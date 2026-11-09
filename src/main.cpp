@@ -70,6 +70,9 @@ static Arduino_DataBus *bus;
 static Arduino_ESP32RGBPanel *rgbpanel;
 static Arduino_RGB_Display *gfx;
 static uint16_t *fb;
+static bool gfxOk = false;
+static uint8_t touchAddr = 0;
+static int blDuty = -1, blFreq = 5000;
 static uint8_t *rx, *shown;          // received / drawn RGB, W*H*3
 static int cell, dot, ox, oy;        // layout of the dots on the screen
 static uint8_t *mask;                // cell*cell: 1 = inside the round dot
@@ -136,7 +139,8 @@ static int bri = 128;                 // last brightness the sender asked for (W
 static void backlight() {
   int v = 0;
   if (on) v = S.follow ? map(bri, 0, 255, S.blMin, S.blMax) : S.blMax;
-  ledcWrite(0, constrain(v, 0, 255));
+  blDuty = constrain(v, 0, 255);
+  ledcWrite(0, blDuty);
 }
 
 // ---------- network ----------
@@ -261,7 +265,6 @@ static void hideOverlay() {
 }
 
 // ---------- touch (GT911) ----------
-static uint8_t touchAddr = 0;
 static void touchBegin() {
   Wire.begin(TOUCH_SDA, TOUCH_SCL, 400000);
   for (uint8_t a : {0x5D, 0x14}) {
@@ -314,6 +317,15 @@ static void fillInfo(JsonObject i) {
   i["lip"] = live() ? liveFrom.toString() : "";
   i["uptime"] = millis() / 1000;
   i["freeheap"] = ESP.getFreeHeap();
+  JsonObject dg = i["diag"].to<JsonObject>();     // for troubleshooting the screen
+  dg["gfx"] = gfxOk;
+  dg["fb"] = fb != nullptr;
+  dg["psram"] = ESP.getPsramSize();
+  dg["psramFree"] = ESP.getFreePsram();
+  dg["touch"] = touchAddr;
+  dg["blDuty"] = blDuty;
+  dg["blFreq"] = blFreq;
+  dg["idle"] = idleShown;
   JsonObject l = i["leds"].to<JsonObject>();
   l["count"] = S.w * S.h;
   l["fps"] = fps;
@@ -458,6 +470,17 @@ static void setupWeb() {
     p["x"] = 0; p["y"] = 0; p["w"] = S.w; p["h"] = S.h;
     sendJson(d);
   });
+  web.on("/api/test", HTTP_GET, [] {      // troubleshooting: /api/test?color=ff0000&duty=255&freq=5000
+    if (web.hasArg("freq")) { blFreq = constrain(web.arg("freq").toInt(), 50, 40000); ledcSetup(0, blFreq, 8); ledcAttachPin(TFT_BCKL, 0); }
+    if (web.hasArg("duty")) { blDuty = constrain(web.arg("duty").toInt(), 0, 255); ledcWrite(0, blDuty); }
+    if (web.hasArg("pin")) { int v = web.arg("pin").toInt(); ledcDetachPin(TFT_BCKL); pinMode(TFT_BCKL, OUTPUT); digitalWrite(TFT_BCKL, v ? HIGH : LOW); }
+    if (web.hasArg("color")) {
+      uint32_t c = strtoul(web.arg("color").c_str(), nullptr, 16);
+      gfx->fillScreen(rgb565(c >> 16, c >> 8, c));
+      idleShown = true;   // the next pixels or idle check redraw over it
+    }
+    web.send(200, "text/plain", String("gfx=") + gfxOk + " fb=" + (fb != nullptr) + " duty=" + blDuty + " freq=" + blFreq);
+  });
   web.on("/api/overlay", HTTP_POST, [] {   // Signinator sends the song so a tap can show it
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) == DeserializationError::Ok) {
@@ -487,8 +510,9 @@ void setup() {
                                        TFT_B4, 1, 10, 8, 50, 1, 10, 8, 20);
   gfx = new Arduino_RGB_Display(TFT_W, TFT_H, rgbpanel, 0, true, bus, GFX_NOT_DEFINED, st7701_4848s040_init,
                                 sizeof(st7701_4848s040_init));
-  gfx->begin(GFX_NOT_DEFINED);
+  gfxOk = gfx->begin(GFX_NOT_DEFINED);
   fb = gfx->getFramebuffer();
+  Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
   layout();
   backlight();
   touchBegin();
