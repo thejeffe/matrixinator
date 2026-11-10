@@ -117,8 +117,34 @@ static void layout() {
 }
 
 // Draw the LEDs that changed. Returns quickly when nothing did.
+static uint16_t lineBuf[TFT_W];        // one screen line (internal RAM), copied down for each row of a pixel
+
 static void render(const uint8_t *rx) {
   int yMin = TFT_H, yMax = -1;
+  if (pixelLook) {                       // square pixels: build one line per row, copy it `cell` times
+    const size_t rowBytes = (size_t)curW * 3;
+    for (int ly = 0; ly < curH; ly++) {
+      int py = oy + ly * cell;
+      if (py + cell > overlayTop) break;
+      const uint8_t *src = rx + ly * rowBytes;
+      uint8_t *old = shown + ly * rowBytes;
+      if (!forceRedraw && memcmp(src, old, rowBytes) == 0) continue;
+      memcpy(old, src, rowBytes);
+      uint16_t *ln = lineBuf + ox;
+      for (int lx = 0; lx < curW; lx++) {
+        const uint8_t *p = src + lx * 3;
+        uint16_t c = rgb565(dimLut[p[0]], dimLut[p[1]], dimLut[p[2]]);
+        for (int k = 0; k < cell; k++) *ln++ = c;
+      }
+      size_t n = (size_t)curW * cell * 2;
+      for (int y = 0; y < cell; y++) memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
+      yMin = min(yMin, py);
+      yMax = max(yMax, py + cell - 1);
+    }
+    forceRedraw = false;
+    if (yMax >= yMin) Cache_WriteBack_Addr((uint32_t)(fb + yMin * TFT_W), (yMax - yMin + 1) * TFT_W * 2);
+    return;
+  }
   for (int ly = 0; ly < curH; ly++) {
     int py = oy + ly * cell;
     if (py + cell > overlayTop) break;
