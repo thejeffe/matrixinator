@@ -286,15 +286,32 @@ static void drawNewFrame() {
 static bool live() { return lastFrameAt && millis() - lastFrameAt < LIVE_TIMEOUT_MS; }
 
 // ---------- photos (album art, GIFs, pictures from Signinator: full resolution, no dots) ----------
-// POST /api/photo with a JPEG as a file upload (multipart, field "photo"); it's drawn centered, full screen,
-// dimmed like everything else. LED pixels arriving afterwards clear it and go back to dots.
+// Two ways in:
+//  * TCP port 4049 (preferred): a connection that stays open. Each frame is a 12-byte header
+//    "MXF1", flags (bit 0: draw at 2x), 3 reserved bytes, uint32 little-endian length, then a JPEG.
+//    A task receives it; the main loop draws it; then one byte 'K' goes back. The sender waits for the
+//    'K' before the next frame, so it sends exactly as fast as the screen can draw.
+//  * POST /api/photo (JPEG as a multipart file upload), for single pictures.
+// Photos are drawn centered (2x for small frames, e.g. 240x240 GIF frames) and dimmed like the rest.
+// LED pixels arriving afterwards clear the photo and go back to dots.
 static const size_t PHOTO_MAX = 400 * 1024;
-static uint8_t *photoBuf = nullptr;
+static const uint16_t PHOTO_PORT = 4049;
+static uint8_t *photoBuf = nullptr;          // HTTP uploads
 static size_t photoLen = 0;
 static bool photoOk = false;
+static uint8_t *streamBuf = nullptr;         // TCP frames
+static volatile size_t streamLen = 0;
+static volatile uint8_t streamFlags = 0;
+static volatile bool streamPending = false;
+static SemaphoreHandle_t streamDrawn;
 static JPEGDEC jpeg;
 static uint8_t dim5[32], dim6[64];
 static int dimTabFor = -1;
+static int photoScale = 1, photoOx = 0, photoOy = 0;
+
+static inline uint16_t dim565(uint16_t c) {
+  return (dim5[c >> 11] << 11) | (dim6[(c >> 5) & 63] << 5) | dim5[c & 31];
+}
 
 static int photoDraw(JPEGDRAW *d) {
   if (dimTabFor != blDuty) {
@@ -302,39 +319,104 @@ static int photoDraw(JPEGDRAW *d) {
     for (int i = 0; i < 64; i++) dim6[i] = (i * blDuty + 127) / 255;
     dimTabFor = blDuty;
   }
-  bool dimIt = blDuty < 255;
+  const bool dimIt = blDuty < 255;
+  const int sc = photoScale;
   for (int y = 0; y < d->iHeight; y++) {
-    int sy = d->y + y;
-    if (sy < 0 || sy >= TFT_H || sy >= overlayTop) continue;
     const uint16_t *src = d->pPixels + y * d->iWidth;
-    int w = min(d->iWidthUsed, TFT_W - d->x);
+    int x0 = photoOx + d->x * sc;
+    int w = min(d->iWidthUsed, (TFT_W - x0) / sc);
     if (w <= 0) continue;
-    uint16_t *dst = fb + sy * TFT_W + d->x;
-    if (!dimIt) { memcpy(dst, src, w * 2); continue; }
-    for (int x = 0; x < w; x++) {
-      uint16_t c = src[x];
-      dst[x] = (dim5[c >> 11] << 11) | (dim6[(c >> 5) & 63] << 5) | dim5[c & 31];
+    int sy = photoOy + (d->y + y) * sc;
+    if (sy < 0 || sy + sc > TFT_H || sy + sc > overlayTop) continue;
+    uint16_t *dst = fb + sy * TFT_W + x0;
+    if (sc == 1) {
+      if (!dimIt) { memcpy(dst, src, w * 2); continue; }
+      for (int x = 0; x < w; x++) dst[x] = dim565(src[x]);
+      continue;
     }
+    for (int x = 0; x < w; x++) {               // 2x: each pixel twice across, the line twice down
+      uint16_t c = dimIt ? dim565(src[x]) : src[x];
+      dst[2 * x] = c; dst[2 * x + 1] = c;
+    }
+    memcpy(dst + TFT_W, dst, w * 2 * 2);
   }
   return 1;
 }
 
-static void showPhoto() {
-  if (!on || !photoOk || !photoLen) return;
-  if (!jpeg.openRAM(photoBuf, photoLen, photoDraw)) return;
+static void showPhoto(uint8_t *data, size_t len, int scale) {
+  if (!on || !data || !len) return;
+  if (!jpeg.openRAM(data, len, photoDraw)) return;
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
   int w = jpeg.getWidth(), h = jpeg.getHeight();
-  int opt = 0;                                   // bigger than the screen: let the decoder scale down
-  if (w > TFT_W * 4 || h > TFT_H * 4) { opt = JPEG_SCALE_EIGHTH; w /= 8; h /= 8; }
-  else if (w > TFT_W * 2 || h > TFT_H * 2) { opt = JPEG_SCALE_QUARTER; w /= 4; h /= 4; }
-  else if (w > TFT_W || h > TFT_H) { opt = JPEG_SCALE_HALF; w /= 2; h /= 2; }
+  int opt = 0;
+  photoScale = (scale == 2 && w * 2 <= TFT_W && h * 2 <= TFT_H) ? 2 : 1;
+  if (photoScale == 1) {                       // bigger than the screen: let the decoder scale down
+    if (w > TFT_W * 4 || h > TFT_H * 4) { opt = JPEG_SCALE_EIGHTH; w /= 8; h /= 8; }
+    else if (w > TFT_W * 2 || h > TFT_H * 2) { opt = JPEG_SCALE_QUARTER; w /= 4; h /= 4; }
+    else if (w > TFT_W || h > TFT_H) { opt = JPEG_SCALE_HALF; w /= 2; h /= 2; }
+  }
+  photoOx = max(0, (TFT_W - w * photoScale) / 2);
+  photoOy = max(0, (TFT_H - h * photoScale) / 2);
   if (!photoShown || idleShown) { gfx->fillScreen(BLACK); idleShown = false; }
-  jpeg.decode(max(0, (TFT_W - w) / 2), max(0, (TFT_H - h) / 2), opt);
+  jpeg.decode(0, 0, opt);
   jpeg.close();
   Cache_WriteBack_Addr((uint32_t)fb, TFT_W * TFT_H * 2);
   photoShown = true;
   lastFrameAt = millis();
   frames++;
+}
+
+static bool readAll(int sock, uint8_t *p, size_t n) {
+  while (n) {
+    int r = recv(sock, p, n, 0);
+    if (r <= 0) return false;
+    p += r; n -= r;
+  }
+  return true;
+}
+
+static void photoTask(void *) {
+  int ls = socket(AF_INET, SOCK_STREAM, 0);
+  int one = 1;
+  setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  sockaddr_in a = {};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(PHOTO_PORT);
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind(ls, (sockaddr *)&a, sizeof a);
+  listen(ls, 1);
+  for (;;) {
+    sockaddr_in from;
+    socklen_t fl = sizeof from;
+    int c = accept(ls, (sockaddr *)&from, &fl);
+    if (c < 0) { delay(100); continue; }
+    timeval tv = {30, 0};                      // a sender that goes quiet for 30 s is dropped
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    uint8_t h[12];
+    while (readAll(c, h, sizeof h)) {
+      if (memcmp(h, "MXF1", 4) != 0) break;
+      uint32_t len = h[8] | (h[9] << 8) | (h[10] << 16) | ((uint32_t)h[11] << 24);
+      if (len == 0 || len > PHOTO_MAX || !streamBuf) break;
+      if (!readAll(c, streamBuf, len)) break;
+      streamLen = len;
+      streamFlags = h[4];
+      rxFrom = from.sin_addr.s_addr;
+      xSemaphoreTake(streamDrawn, 0);          // clear a stale signal
+      streamPending = true;
+      if (xSemaphoreTake(streamDrawn, pdMS_TO_TICKS(3000)) != pdTRUE) streamPending = false;
+      if (send(c, "K", 1, 0) != 1) break;
+    }
+    close(c);
+  }
+}
+
+static void drawStreamPhoto() {
+  if (!streamPending) return;
+  liveFrom = IPAddress(rxFrom);
+  showPhoto(streamBuf, streamLen, (streamFlags & 1) ? 2 : 1);
+  streamPending = false;
+  xSemaphoreGive(streamDrawn);
 }
 
 static void centered(const String &s, int y, int size, uint16_t color) {
@@ -386,7 +468,7 @@ static void hideOverlay() {
   overlayTop = TFT_H;
   gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK);
   forceRedraw = true;
-  if (photoShown && live()) showPhoto();
+  if (photoShown && live()) { gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK); }   // the next photo fills it
   else if (live()) render(bufs[drawIdx]);
   else showIdle();
 }
@@ -454,6 +536,7 @@ static void fillInfo(JsonObject i) {
   dg["idle"] = idleShown;
   dg["dropped"] = rxDropped;
   dg["photo"] = photoShown;
+  i["photoPort"] = PHOTO_PORT;                  // Signinator streams photos here
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
   mx["w"] = curW;
   mx["h"] = curH;
@@ -625,7 +708,7 @@ static void setupWeb() {
   web.on("/api/photo", HTTP_POST, [] {
     bool ok = photoOk;
     web.send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
-    if (ok) { liveFrom = web.client().remoteIP(); showPhoto(); }
+    if (ok) { liveFrom = web.client().remoteIP(); showPhoto(photoBuf, photoLen, 1); }
   }, [] {
     HTTPUpload &u = web.upload();
     if (u.status == UPLOAD_FILE_START) {
@@ -699,12 +782,16 @@ void setup() {
     MDNS.addService("wled", "tcp", 80);
   }
   xTaskCreatePinnedToCore(rxTask, "ddp", 6144, nullptr, 5, nullptr, 0);
+  streamBuf = (uint8_t *)ps_malloc(PHOTO_MAX);
+  streamDrawn = xSemaphoreCreateBinary();
+  xTaskCreatePinnedToCore(photoTask, "photo", 6144, nullptr, 4, nullptr, 0);
   setupWeb();
   showIdle();
 }
 
 void loop() {
   improv::loop();
+  drawStreamPhoto();
   drawNewFrame();
   web.handleClient();
   if (apOn) dns.processNextRequest();
