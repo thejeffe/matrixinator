@@ -221,6 +221,7 @@ static uint32_t lastFrameAt = 0, frames = 0, fpsAt = 0;
 static int fps = 0;
 static IPAddress liveFrom;
 static bool idleShown = false;
+static bool photoShown = false;    // a photo (album art etc.) is on the screen, not LED dots
 
 // The pixels arrive on their own task (core 0) so no packet is lost while the main loop draws or serves pages.
 static void rxTask(void *) {
@@ -290,7 +291,7 @@ static bool live() { return lastFrameAt && millis() - lastFrameAt < LIVE_TIMEOUT
 static const size_t PHOTO_MAX = 400 * 1024;
 static uint8_t *photoBuf = nullptr;
 static size_t photoLen = 0;
-static bool photoOk = false, photoShown = false;
+static bool photoOk = false;
 static JPEGDEC jpeg;
 static uint8_t dim5[32], dim6[64];
 static int dimTabFor = -1;
