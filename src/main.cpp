@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include <esp32s3/rom/cache.h>
 #include <lwip/sockets.h>
+#include <JPEGDEC.h>
 #include "board.h"
 #include "panel_init.h"
 #include "improv.h"
@@ -274,7 +275,7 @@ static void drawNewFrame() {
   if (readyIdx >= 0) { drawIdx = readyIdx; readyIdx = -1; idx = drawIdx; }
   xSemaphoreGive(bufLock);
   if (idx < 0) return;
-  if (idleShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; }
+  if (idleShown || photoShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; photoShown = false; }
   lastFrameAt = millis();
   liveFrom = IPAddress(rxFrom);
   if (on) render(bufs[idx]);
@@ -282,6 +283,58 @@ static void drawNewFrame() {
 }
 
 static bool live() { return lastFrameAt && millis() - lastFrameAt < LIVE_TIMEOUT_MS; }
+
+// ---------- photos (album art, GIFs, pictures from Signinator: full resolution, no dots) ----------
+// POST /api/photo with a JPEG as a file upload (multipart, field "photo"); it's drawn centered, full screen,
+// dimmed like everything else. LED pixels arriving afterwards clear it and go back to dots.
+static const size_t PHOTO_MAX = 400 * 1024;
+static uint8_t *photoBuf = nullptr;
+static size_t photoLen = 0;
+static bool photoOk = false, photoShown = false;
+static JPEGDEC jpeg;
+static uint8_t dim5[32], dim6[64];
+static int dimTabFor = -1;
+
+static int photoDraw(JPEGDRAW *d) {
+  if (dimTabFor != blDuty) {
+    for (int i = 0; i < 32; i++) dim5[i] = (i * blDuty + 127) / 255;
+    for (int i = 0; i < 64; i++) dim6[i] = (i * blDuty + 127) / 255;
+    dimTabFor = blDuty;
+  }
+  bool dimIt = blDuty < 255;
+  for (int y = 0; y < d->iHeight; y++) {
+    int sy = d->y + y;
+    if (sy < 0 || sy >= TFT_H || sy >= overlayTop) continue;
+    const uint16_t *src = d->pPixels + y * d->iWidth;
+    int w = min(d->iWidthUsed, TFT_W - d->x);
+    if (w <= 0) continue;
+    uint16_t *dst = fb + sy * TFT_W + d->x;
+    if (!dimIt) { memcpy(dst, src, w * 2); continue; }
+    for (int x = 0; x < w; x++) {
+      uint16_t c = src[x];
+      dst[x] = (dim5[c >> 11] << 11) | (dim6[(c >> 5) & 63] << 5) | dim5[c & 31];
+    }
+  }
+  return 1;
+}
+
+static void showPhoto() {
+  if (!on || !photoOk || !photoLen) return;
+  if (!jpeg.openRAM(photoBuf, photoLen, photoDraw)) return;
+  jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+  int w = jpeg.getWidth(), h = jpeg.getHeight();
+  int opt = 0;                                   // bigger than the screen: let the decoder scale down
+  if (w > TFT_W * 4 || h > TFT_H * 4) { opt = JPEG_SCALE_EIGHTH; w /= 8; h /= 8; }
+  else if (w > TFT_W * 2 || h > TFT_H * 2) { opt = JPEG_SCALE_QUARTER; w /= 4; h /= 4; }
+  else if (w > TFT_W || h > TFT_H) { opt = JPEG_SCALE_HALF; w /= 2; h /= 2; }
+  if (!photoShown || idleShown) { gfx->fillScreen(BLACK); idleShown = false; }
+  jpeg.decode(max(0, (TFT_W - w) / 2), max(0, (TFT_H - h) / 2), opt);
+  jpeg.close();
+  Cache_WriteBack_Addr((uint32_t)fb, TFT_W * TFT_H * 2);
+  photoShown = true;
+  lastFrameAt = millis();
+  frames++;
+}
 
 static void centered(const String &s, int y, int size, uint16_t color) {
   gfx->setTextSize(size);
@@ -332,7 +385,9 @@ static void hideOverlay() {
   overlayTop = TFT_H;
   gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK);
   forceRedraw = true;
-  if (live()) render(bufs[drawIdx]); else showIdle();
+  if (photoShown && live()) showPhoto();
+  else if (live()) render(bufs[drawIdx]);
+  else showIdle();
 }
 
 // ---------- touch (GT911) ----------
@@ -397,6 +452,7 @@ static void fillInfo(JsonObject i) {
   dg["blDuty"] = blDuty;
   dg["idle"] = idleShown;
   dg["dropped"] = rxDropped;
+  dg["photo"] = photoShown;
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
   mx["w"] = curW;
   mx["h"] = curH;
@@ -564,6 +620,24 @@ static void setupWeb() {
     else setLook(S.w, S.h, false, false);
     if (!live()) showIdle();
     web.send(200, "application/json", "{\"ok\":true}");
+  });
+  web.on("/api/photo", HTTP_POST, [] {
+    bool ok = photoOk;
+    web.send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    if (ok) { liveFrom = web.client().remoteIP(); showPhoto(); }
+  }, [] {
+    HTTPUpload &u = web.upload();
+    if (u.status == UPLOAD_FILE_START) {
+      if (!photoBuf) photoBuf = (uint8_t *)ps_malloc(PHOTO_MAX);
+      photoLen = 0;
+      photoOk = photoBuf != nullptr;
+    } else if (u.status == UPLOAD_FILE_WRITE && photoOk) {
+      if (photoLen + u.currentSize > PHOTO_MAX) { photoOk = false; return; }
+      memcpy(photoBuf + photoLen, u.buf, u.currentSize);
+      photoLen += u.currentSize;
+    } else if (u.status == UPLOAD_FILE_ABORTED) {
+      photoOk = false;
+    }
   });
   web.on("/api/overlay", HTTP_POST, [] {   // Signinator sends the song so a tap can show it
     JsonDocument in;
