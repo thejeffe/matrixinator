@@ -86,7 +86,7 @@ static bool customSize = false;      // size set by the sender (Signinator's ful
 static uint8_t *bufs[3] = {nullptr, nullptr, nullptr}, *shown = nullptr;
 static int wIdx = 0, readyIdx = -1, drawIdx = 2;
 static SemaphoreHandle_t bufLock;
-static volatile uint32_t lastPushMs = 0, rxFrom = 0, rxDropped = 0;
+static volatile uint32_t lastPushMs = 0, rxFrom = 0, rxDropped = 0, rxBad = 0;
 static int cell, dot, ox, oy;        // layout of the dots on the screen
 static uint8_t *mask;                // cell*cell: 1 = inside the round dot
 static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts and how wide it is
@@ -255,6 +255,11 @@ static void rxTask(void *) {
   int rcv = 64 * 1024;
   setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
   static uint8_t pkt[1500];
+  // A frame is shown only if every byte of it arrived and it fits the current size. Otherwise (a lost
+  // packet, or frames of another size right after a look change) it's dropped and the last good frame
+  // stays: no mix of new and leftover pixels.
+  uint32_t got = 0;
+  bool bad = false;
   for (;;) {
     sockaddr_in from;
     socklen_t fl = sizeof from;
@@ -266,12 +271,19 @@ static void rxTask(void *) {
     if (pkt[3] == 251 || pkt[3] == 254 || hdr + (int)len > n) continue;  // config/status queries: ignore
     xSemaphoreTake(bufLock, portMAX_DELAY);
     uint32_t total = (uint32_t)curW * curH * 3;
-    if (off < total) memcpy(bufs[wIdx] + off, pkt + hdr, min(len, total - off));
-    if (pkt[0] & 0x01) {                                         // PUSH: this frame is complete
-      if (readyIdx >= 0) { int t = readyIdx; readyIdx = wIdx; wIdx = t; rxDropped++; }   // replace an undrawn frame
-      else { readyIdx = wIdx; wIdx = 3 - readyIdx - drawIdx; }
-      lastPushMs = millis();
-      rxFrom = from.sin_addr.s_addr;
+    if (off + len > total) bad = true;                           // another size: not for this look
+    else { memcpy(bufs[wIdx] + off, pkt + hdr, len); got += len; }
+    if (pkt[0] & 0x01) {                                         // PUSH: end of a frame
+      if (!bad && got == total) {
+        if (readyIdx >= 0) { int t = readyIdx; readyIdx = wIdx; wIdx = t; rxDropped++; }   // replace an undrawn frame
+        else { readyIdx = wIdx; wIdx = 3 - readyIdx - drawIdx; }
+        lastPushMs = millis();
+        rxFrom = from.sin_addr.s_addr;
+      } else {
+        rxBad++;                                                 // incomplete or wrong size: skip it
+      }
+      got = 0;
+      bad = false;
     }
     xSemaphoreGive(bufLock);
   }
@@ -556,6 +568,7 @@ static void fillInfo(JsonObject i) {
   dg["blDuty"] = blDuty;
   dg["idle"] = idleShown;
   dg["dropped"] = rxDropped;
+  dg["badFrames"] = rxBad;                       // incomplete or wrong-size frames that were skipped
   dg["photo"] = photoShown;
   i["photoPort"] = PHOTO_PORT;                  // Signinator streams photos here
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
