@@ -213,9 +213,10 @@ static bool joinWifi(const String &ssid, const String &pass, bool save) {
   WiFi.mode(apOn ? WIFI_AP_STA : WIFI_STA);
   WiFi.setHostname(S.host.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
-  for (int i = 0; i < 150 && WiFi.status() != WL_CONNECTED; i++) {
-    delay(100);
-    if (i % 10 == 0) gfx->fillCircle(TFT_W / 2 - 60 + (i / 10) * 8, TFT_H - 40, 3, DARKGREY);
+  uint32_t t0 = millis();
+  while (millis() - t0 < 15000 && WiFi.status() != WL_CONNECTED) {
+    if (idleShown) mrStep();
+    delay(10);
   }
   if (WiFi.status() != WL_CONNECTED) return false;
   if (save) { S.ssid = ssid; S.pass = pass; saveSettings(); }
@@ -460,135 +461,121 @@ static void centered(const String &s, int y, int size, uint16_t color) {
   gfx->print(s);
 }
 
-// ---------- logo: green digital rain on LED dots; an "M" rains into place ----------
-// Shown at boot, and with a progress bar while a firmware update is written (input is ignored then).
-static const int LG = 32, LCELL = 12, LOX = (TFT_W - LG * LCELL) / 2, LOY = 10;
-static uint8_t logoMask[LG * LG], logoLit[LG * LG];
-static float logoGlow[LG * LG], dropY[LG], dropV[LG];
-static uint16_t logoPrev[LG * LG];
-static int16_t logoSpanS[LCELL], logoSpanL[LCELL];
+// ---------- Matrix rain: boot, idle (connecting / IP address) and firmware updates ----------
+// Full-screen falling green characters: a bright head per column, a trail fading from bright to dark green,
+// characters flickering as they change. A black panel in the middle shows the name and the status; the
+// rain never draws over it. Only cells whose colour changes are redrawn, so it's cheap enough to run
+// while connecting to Wi-Fi and while an update is written.
+static const int MR_CW = 12, MR_CH = 16, MR_COLS = TFT_W / MR_CW, MR_ROWS = TFT_H / MR_CH;   // 40 x 30
+static uint8_t mrChar[MR_COLS * MR_ROWS];
+static float mrHead[MR_COLS], mrSpeed[MR_COLS];
+static uint8_t mrLen[MR_COLS];
+static int mrLastRow[MR_COLS];
+static int boxX0 = 0, boxY0 = 0, boxX1 = 0, boxY1 = 0;      // the panel; no rain in here
+static uint32_t mrAt = 0;
+static String panelKey;
 static volatile bool updating = false;
 static size_t upTotal = 0, upDone = 0;
-static uint32_t upAnimAt = 0;
+static const char MR_SET[] = "0123456789ABCDEFXZ:=+*<>|";
 
-static void logoInit() {
-  memset(logoMask, 0, sizeof logoMask);
-  memset(logoLit, 0, sizeof logoLit);
-  for (int i = 0; i < LG * LG; i++) { logoGlow[i] = 0; logoPrev[i] = 0xFFFF; }
-  auto set = [](int x, int y) { if (x >= 0 && x < LG && y >= 0 && y < LG) logoMask[y * LG + x] = 1; };
-  for (int y = 7; y <= 24; y++)                     // the two legs of the M
-    for (int k = 0; k < 3; k++) { set(5 + k, y); set(24 + k, y); }
-  for (int i = 0; i <= 9; i++) {                    // the two diagonals, meeting in the middle
-    int y = 7 + i, xl = 8 + (i * 7) / 9, xr = 23 - (i * 7) / 9;
-    for (int k = 0; k < 2; k++) { set(xl + k, y); set(xr - k, y); }
-  }
-  float r = (LCELL - 2) / 2.0f, c = (LCELL - 1) / 2.0f;
-  for (int y = 0; y < LCELL; y++) {                 // a round dot: one run of pixels per line
-    float dy = y - c, w = r * r - dy * dy;
-    if (w < 0) { logoSpanS[y] = 0; logoSpanL[y] = 0; continue; }
-    int half = (int)floorf(sqrtf(w) + 0.5f);
-    logoSpanS[y] = max(0, (int)lroundf(c) - half);
-    logoSpanL[y] = min(LCELL - logoSpanS[y], 2 * half + 1);
-  }
-  for (int x = 0; x < LG; x++) { dropY[x] = -(float)(esp_random() % 40); dropV[x] = 0.35f + (esp_random() % 70) / 100.0f; }
+static uint8_t mrRandChar() {
+  const int a = sizeof(MR_SET) - 1, n = a + 16;              // plus 16 Greek-looking glyphs (cp437 0xE0-0xEF)
+  int r = esp_random() % n;
+  return r < a ? MR_SET[r] : 0xE0 + (r - a);
 }
-
-static void logoStep(bool revealAll) {
-  for (int i = 0; i < LG * LG; i++) logoGlow[i] *= 0.80f;
-  for (int x = 0; x < LG; x++) {
-    dropY[x] += dropV[x];
-    int hy = (int)dropY[x];
-    if (hy >= 0 && hy < LG) {
-      logoGlow[hy * LG + x] = 2.0f;                 // > 1: the bright head of the drop
-      if (logoMask[hy * LG + x]) logoLit[hy * LG + x] = 1;
-    }
-    if (dropY[x] > LG + 12) { dropY[x] = -(float)(esp_random() % 24); dropV[x] = 0.35f + (esp_random() % 70) / 100.0f; }
+static bool mrInBox(int c, int r) {
+  int x = c * MR_CW, y = r * MR_CH;
+  return x + MR_CW > boxX0 && x < boxX1 && y + MR_CH > boxY0 && y < boxY1;
+}
+static uint16_t mrColor(int d, int len) {
+  if (d == 0) return rgb565(200, 255, 200);                  // the head
+  if (d <= 2) return rgb565(60, 255, 90);
+  if (d < len / 2) return rgb565(0, 190, 50);
+  if (d < len) return rgb565(0, 95, 25);
+  return BLACK;
+}
+static void mrCell(int c, int r, uint16_t color, bool newChar) {
+  if (r < 0 || r >= MR_ROWS || mrInBox(c, r)) return;
+  uint8_t &ch = mrChar[r * MR_COLS + c];
+  if (newChar || !ch) ch = mrRandChar();
+  gfx->setTextSize(2);
+  gfx->drawChar(c * MR_CW, r * MR_CH, ch, color, BLACK);
+}
+static void mrReset(int c, bool anywhere) {
+  mrHead[c] = anywhere ? -(float)(esp_random() % MR_ROWS) : -(float)(esp_random() % 12);
+  mrSpeed[c] = 0.25f + (esp_random() % 60) / 100.0f;
+  mrLen[c] = 8 + esp_random() % 16;
+  mrLastRow[c] = -1000;
+}
+static void mrInit() {
+  memset(mrChar, 0, sizeof mrChar);
+  for (int c = 0; c < MR_COLS; c++) mrReset(c, true);
+  boxX0 = boxY0 = boxX1 = boxY1 = 0;
+  panelKey = "";
+  mrAt = 0;
+}
+static void mrStep() {                                        // about 25 frames a second
+  if (millis() - mrAt < 40) return;
+  mrAt = millis();
+  for (int c = 0; c < MR_COLS; c++) {
+    mrHead[c] += mrSpeed[c];
+    int hr = (int)floorf(mrHead[c]), len = mrLen[c];
+    if (hr == mrLastRow[c]) continue;
+    mrLastRow[c] = hr;
+    // only cells whose colour changes when the head moves down one row
+    const int ds[5] = {0, 1, 3, len / 2, len};
+    for (int k = 0; k < 5; k++) mrCell(c, hr - ds[k], mrColor(ds[k], len), k == 0);
+    if (hr - len > MR_ROWS) mrReset(c, false);
   }
-  if (revealAll) memcpy(logoLit, logoMask, sizeof logoLit);
-}
-
-static void logoDraw() {
-  int yMin = TFT_H, yMax = -1;
-  for (int y = 0; y < LG; y++)
-    for (int x = 0; x < LG; x++) {
-      int i = y * LG + x;
-      float g = logoGlow[i];
-      uint16_t c;
-      if (g > 1.0f) c = rgb565(190, 255, 190);                                     // drop head
-      else if (logoLit[i]) c = rgb565(40, 255, 90);                                // the M, lit for good
-      else { int v = (int)(g * 210); c = v > 6 ? rgb565(0, v, v / 6) : rgb565(10, 22, 12); }   // tail / unlit dot
-      if (c == logoPrev[i]) continue;
-      logoPrev[i] = c;
-      int px = LOX + x * LCELL, py = LOY + y * LCELL;
-      for (int k = 0; k < LCELL; k++) {
-        int len = logoSpanL[k];
-        if (!len) continue;
-        uint16_t *d = fb + (py + k) * TFT_W + px + logoSpanS[k];
-        for (int j = 0; j < len; j++) d[j] = c;
-      }
-      yMin = min(yMin, py); yMax = max(yMax, py + LCELL - 1);
-    }
-  if (yMax >= yMin) Cache_WriteBack_Addr((uint32_t)(fb + yMin * TFT_W), (yMax - yMin + 1) * TFT_W * 2);
-}
-
-static const int LOGO_TEXT_Y = LOY + LG * LCELL + 8;
-
-static void bootLogo() {
-  gfx->fillScreen(BLACK);
-  logoInit();
-  digitalWrite(TFT_BCKL, HIGH);
-  uint32_t t0 = millis();
-  bool titled = false;
-  while (millis() - t0 < 3200) {
-    uint32_t f0 = millis();
-    logoStep(millis() - t0 > 2200);                 // the M is complete for the last second
-    logoDraw();
-    if (!titled && millis() - t0 > 1600) {
-      centered("MATRIXINATOR", LOGO_TEXT_Y + 6, 4, rgb565(40, 255, 90));
-      centered(String("v") + VERSION, LOGO_TEXT_Y + 46, 1, rgb565(20, 120, 50));
-      titled = true;
-    }
-    improv::loop();
-    int wait = 33 - (int)(millis() - f0);
-    if (wait > 0) delay(wait);
+  for (int k = 0; k < 6; k++) {                              // flicker: a few lit characters change
+    int c = esp_random() % MR_COLS, r = esp_random() % MR_ROWS;
+    int d = (int)floorf(mrHead[c]) - r;
+    if (d > 0 && d < mrLen[c]) mrCell(c, r, mrColor(d, mrLen[c]), true);
   }
 }
-
-static void updateScreen(const char *msg, uint16_t color) {
-  gfx->fillRect(0, LOGO_TEXT_Y, TFT_W, TFT_H - LOGO_TEXT_Y, BLACK);
-  centered(msg, LOGO_TEXT_Y + 4, 3, color);
+static void mrPanel(const String &title, uint16_t titleColor, const String &l2, uint16_t c2, const String &l3) {
+  boxX0 = 36; boxX1 = TFT_W - 36; boxY0 = 168; boxY1 = 318;
+  gfx->fillRect(boxX0, boxY0, boxX1 - boxX0, boxY1 - boxY0, BLACK);
+  gfx->drawRect(boxX0 + 3, boxY0 + 3, boxX1 - boxX0 - 6, boxY1 - boxY0 - 6, rgb565(0, 90, 25));
+  centered(title, boxY0 + 22, 4, titleColor);
+  if (l2.length()) centered(l2, boxY0 + 74, 2, c2);
+  if (l3.length()) centered(l3, boxY0 + 112, 1, rgb565(0, 150, 45));
 }
 
 static void updateProgress() {
-  const int bw = 360, bx = (TFT_W - bw) / 2, by = LOGO_TEXT_Y + 40, bh = 12;
-  gfx->drawRect(bx - 2, by - 2, bw + 4, bh + 4, rgb565(20, 120, 50));
+  const int bw = 320, bx = (TFT_W - bw) / 2, by = boxY0 + 78, bh = 12;
+  gfx->drawRect(bx - 2, by - 2, bw + 4, bh + 4, rgb565(0, 120, 35));
   int fill = upTotal ? (int)((uint64_t)bw * min(upDone, upTotal) / upTotal) : (int)((millis() / 8) % bw);
-  gfx->fillRect(bx, by, fill, bh, rgb565(40, 255, 90));
+  gfx->fillRect(bx, by, fill, bh, rgb565(60, 255, 90));
   if (fill < bw) gfx->fillRect(bx + fill, by, bw - fill, bh, BLACK);
 }
-
+static uint32_t upBarAt = 0;
 static void updateAnimate() {           // called while the update is written: keep the rain going
-  if (millis() - upAnimAt < 40) return;
-  upAnimAt = millis();
-  logoStep(true);
-  logoDraw();
-  updateProgress();
+  mrStep();
+  if (millis() - upBarAt >= 200) { upBarAt = millis(); updateProgress(); }
 }
 
+// The idle screen: the rain, with the name and what's happening in the panel. Called often; only redraws
+// the panel when its text changes (and everything when coming from LED pixels or a photo).
 static void showIdle() {
-  gfx->fillScreen(BLACK);
-  centered(S.name, 170, 4, WHITE);
+  if (!idleShown) { gfx->fillScreen(BLACK); mrInit(); idleShown = true; }
+  String l2, l3;
+  uint16_t c2 = rgb565(60, 255, 90);
   if (WiFi.status() == WL_CONNECTED) {
-    centered(WiFi.localIP().toString(), 230, 3, CYAN);
-    centered("Waiting for pixels (DDP, port 4048)", 280, 2, DARKGREY);
+    l2 = WiFi.localIP().toString();
+    l3 = "waiting for pixels on port 4048 - v" + String(VERSION);
   } else if (apOn) {
-    centered("Join Wi-Fi \"" + apName + "\"", 230, 2, YELLOW);
-    centered("then open http://192.168.4.1", 260, 2, YELLOW);
+    l2 = "Join Wi-Fi " + apName;
+    c2 = rgb565(255, 220, 80);
+    l3 = "then open http://192.168.4.1";
   } else {
-    centered("Connecting to Wi-Fi...", 230, 2, DARKGREY);
+    l2 = "Connecting to Wi-Fi...";
+    l3 = String("v") + VERSION;
   }
-  centered(String("v") + VERSION, 440, 1, DARKGREY);
-  idleShown = true;
+  String key = l2 + "|" + l3;
+  if (key == panelKey) return;
+  panelKey = key;
+  mrPanel(S.name.length() <= 16 ? S.name : String("MATRIXINATOR"), rgb565(60, 255, 90), l2, c2, l3);
 }
 
 // ---------- overlay (tap the screen) ----------
@@ -768,11 +755,11 @@ static void handleUpdateDone() {
   bool ok = !Update.hasError();
   web.sendHeader("Access-Control-Allow-Origin", "*");
   web.send(ok ? 200 : 500, "text/plain", ok ? "Update done, restarting." : "Update failed.");
-  if (ok) { updateScreen("RESTARTING...", rgb565(40, 255, 90)); delay(700); ESP.restart(); }
-  updateScreen("UPDATE FAILED", RED);
+  if (ok) { mrPanel("RESTARTING", rgb565(60, 255, 90), "", 0, ""); delay(700); ESP.restart(); }
+  mrPanel("UPDATE FAILED", RED, "", 0, "");
   delay(2500);
   updating = false;
-  gfx->fillScreen(BLACK); forceRedraw = true; photoShown = false;
+  forceRedraw = true; photoShown = false; idleShown = false;
   showIdle();
 }
 static void handleUpdateUpload() {
@@ -784,11 +771,10 @@ static void handleUpdateUpload() {
     upDone = 0;
     digitalWrite(TFT_BCKL, HIGH);
     gfx->fillScreen(BLACK);
-    logoInit();
-    logoStep(true);
-    logoDraw();
-    updateScreen("FIRMWARE UPDATE", rgb565(40, 255, 90));
-    centered("Don't unplug", LOGO_TEXT_Y + 62, 1, rgb565(20, 120, 50));
+    mrInit();
+    idleShown = false;
+    mrPanel("FIRMWARE UPDATE", rgb565(60, 255, 90), "", 0, "Don't unplug");
+    updateProgress();
     Update.begin(UPDATE_SIZE_UNKNOWN);
   } else if (u.status == UPLOAD_FILE_WRITE) {
     Update.write(u.buf, u.currentSize);
@@ -806,6 +792,11 @@ static void handleState() {
   if (web.method() == HTTP_POST) {
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) == DeserializationError::Ok) {
+      if (in["rb"] | false) {                    // restart, like WLED's {"rb":true}
+        web.send(200, "application/json", "{\"success\":true}");
+        delay(300);
+        ESP.restart();
+      }
       if (in["on"].is<bool>()) on = in["on"].as<bool>();
       else if (in["on"].is<const char *>() && String(in["on"].as<const char *>()) == "t") on = !on;
       if (in["bri"].is<int>()) bri = constrain(in["bri"].as<int>(), 0, 255);
@@ -892,6 +883,11 @@ static void setupWeb() {
       photoOk = false;
     }
   });
+  web.on("/api/restart", HTTP_POST, [] {
+    web.send(200, "application/json", "{\"ok\":true}");
+    delay(300);
+    ESP.restart();
+  });
   web.on("/api/overlay", HTTP_POST, [] {   // Signinator sends the song so a tap can show it
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) == DeserializationError::Ok) {
@@ -934,7 +930,7 @@ void setup() {
   char ap[32];
   snprintf(ap, sizeof ap, "Matrixinator-%02X%02X", mac[4], mac[5]);
   apName = ap;
-  bootLogo();
+  idleShown = false;
   showIdle();
 
   improv::begin({[](const String &s, const String &p) {
@@ -980,6 +976,11 @@ void loop() {
   }
 
   if (on && !live() && lastFrameAt && !idleShown && !overlayUntil) showIdle();   // stream stopped
+  if (idleShown && on && !overlayUntil) {                     // the rain keeps falling; panel follows Wi-Fi
+    mrStep();
+    static uint32_t panelAt = 0;
+    if (now - panelAt > 1000) { panelAt = now; showIdle(); }
+  }
 
   static uint32_t touchAt = 0;
   if (now - touchAt > 40) {
