@@ -634,10 +634,23 @@ void loop() {
     static bool wasDown = false;
     static uint32_t upAt = 0;
     int t = touched();
-    if (t == 1 && !wasDown && now - upAt > 250) { if (overlayUntil) hideOverlay(); else if (on) showOverlay(); }
+    if (t == 1 && !wasDown && now - upAt > 250) {
+      if (on) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
+      if (overlayUntil) hideOverlay(); else if (on) showOverlay();
+    }
     if (t == 0 && wasDown) upAt = now;
     if (t >= 0) wasDown = t == 1;
   }
   if (overlayUntil && now > overlayUntil) hideOverlay();
+
+  // The backlight driver sometimes shuts itself off (the picture keeps changing in the dark) and stays off
+  // until its enable pin is switched off and on. Re-arm it every 30 s with a 0.2 ms blip (too short to see).
+  static uint32_t rearmAt = 0;
+  if (on && blDuty > 0 && now - rearmAt >= 30000) {
+    rearmAt = now;
+    digitalWrite(TFT_BCKL, LOW);
+    delayMicroseconds(200);
+    digitalWrite(TFT_BCKL, HIGH);
+  }
   delay(1);
 }
