@@ -15,6 +15,7 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <esp32s3/rom/cache.h>
+#include <lwip/sockets.h>
 #include "board.h"
 #include "panel_init.h"
 #include "improv.h"
@@ -23,7 +24,7 @@
 #define FW_VERSION ""
 #endif
 static const char *VERSION = sizeof(FW_VERSION) > 1 ? FW_VERSION : "dev";
-static const int MAX_W = 128, MAX_H = 128;
+static const int MAX_W = 240, MAX_H = 240;   // 240 = 2 screen pixels per LED
 static const uint32_t LIVE_TIMEOUT_MS = 2500;
 
 // ---------- settings ----------
@@ -32,7 +33,7 @@ struct Settings {
   int w = 32, h = 32;
   bool unlit = true;        // draw unlit LEDs as dark grey dots
   bool follow = true;       // backlight follows the brightness the sender sets
-  int blMax = 255, blMin = 25;
+  int blMax = 255, blMin = 70;
 } S;
 static Preferences prefs;
 
@@ -47,7 +48,7 @@ static void loadSettings() {
   S.unlit = prefs.getBool("unlit", true);
   S.follow = prefs.getBool("follow", true);
   S.blMax = constrain(prefs.getInt("blmax", 255), 10, 255);
-  S.blMin = constrain(prefs.getInt("blmin", 25), 0, 255);
+  S.blMin = constrain(prefs.getInt("blmin", 70), 0, 255);
   prefs.end();
 }
 static void saveSettings() {
@@ -73,7 +74,15 @@ static uint16_t *fb;
 static bool gfxOk = false;
 static uint8_t touchAddr = 0;
 static int blDuty = -1, blFreq = 5000;
-static uint8_t *rx, *shown;          // received / drawn RGB, W*H*3
+// What's being shown: the saved matrix size as round "LED" dots, or (sent by Signinator for its "full resolution"
+// look) a bigger picture drawn as plain square pixels. Three receive buffers: the receiver task writes one,
+// one waits to be drawn, one is being drawn.
+static int curW = 32, curH = 32;
+static bool pixelLook = false;
+static uint8_t *bufs[3] = {nullptr, nullptr, nullptr}, *shown = nullptr;
+static int wIdx = 0, readyIdx = -1, drawIdx = 2;
+static SemaphoreHandle_t bufLock;
+static volatile uint32_t lastPushMs = 0, rxFrom = 0, rxDropped = 0;
 static int cell, dot, ox, oy;        // layout of the dots on the screen
 static uint8_t *mask;                // cell*cell: 1 = inside the round dot
 static bool forceRedraw = true;
@@ -84,44 +93,43 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void layout() {
-  cell = min(TFT_W / S.w, TFT_H / S.h);
+  cell = min(TFT_W / curW, TFT_H / curH);
   if (cell < 1) cell = 1;
-  int gap = cell >= 6 ? max(1, cell / 7) : 0;
+  int gap = (!pixelLook && cell >= 6) ? max(1, cell / 7) : 0;
   dot = cell - gap;
-  ox = (TFT_W - S.w * cell) / 2;
-  oy = (TFT_H - S.h * cell) / 2;
+  ox = (TFT_W - curW * cell) / 2;
+  oy = (TFT_H - curH * cell) / 2;
   free(mask);
   mask = (uint8_t *)malloc(cell * cell);
   float r = dot / 2.0f, c = (cell - 1) / 2.0f;
   for (int y = 0; y < cell; y++)
     for (int x = 0; x < cell; x++) {
       float dx = x - c, dy = y - c;
-      mask[y * cell + x] = (dot >= 4) ? (dx * dx + dy * dy <= r * r) : (x < dot && y < dot);
+      mask[y * cell + x] = pixelLook ? 1 : (dot >= 4) ? (dx * dx + dy * dy <= r * r) : (x < dot && y < dot);
     }
-  size_t n = (size_t)S.w * S.h * 3;
-  free(rx);
-  free(shown);
-  rx = (uint8_t *)ps_calloc(n, 1);
-  shown = (uint8_t *)ps_calloc(n, 1);
+  size_t n = (size_t)MAX_W * MAX_H * 3;   // allocated once at the largest size
+  for (auto &b : bufs) if (!b) b = (uint8_t *)ps_calloc(n, 1);
+  if (!shown) shown = (uint8_t *)ps_calloc(n, 1);
   gfx->fillScreen(BLACK);
   forceRedraw = true;
 }
 
 // Draw the LEDs that changed. Returns quickly when nothing did.
-static void render() {
+static void render(const uint8_t *rx) {
   int yMin = TFT_H, yMax = -1;
-  for (int ly = 0; ly < S.h; ly++) {
+  for (int ly = 0; ly < curH; ly++) {
     int py = oy + ly * cell;
     if (py + cell > overlayTop) break;
-    for (int lx = 0; lx < S.w; lx++) {
-      int i = (ly * S.w + lx) * 3;
+    for (int lx = 0; lx < curW; lx++) {
+      int i = (ly * curW + lx) * 3;
       uint8_t r = rx[i], g = rx[i + 1], b = rx[i + 2];
       if (!forceRedraw && r == shown[i] && g == shown[i + 1] && b == shown[i + 2]) continue;
       shown[i] = r; shown[i + 1] = g; shown[i + 2] = b;
-      uint16_t c = (S.unlit && r < 10 && g < 10 && b < 10) ? rgb565(24, 24, 24) : rgb565(r, g, b);
+      uint16_t c = (!pixelLook && S.unlit && r < 10 && g < 10 && b < 10) ? rgb565(24, 24, 24) : rgb565(r, g, b);
       int px = ox + lx * cell;
       for (int y = 0; y < cell; y++) {
         uint16_t *row = fb + (py + y) * TFT_W + px;
+        if (pixelLook) { for (int x = 0; x < cell; x++) row[x] = c; continue; }
         const uint8_t *m = mask + y * cell;
         for (int x = 0; x < cell; x++) row[x] = m[x] ? c : BLACK;
       }
@@ -138,7 +146,8 @@ static bool on = true;
 static int bri = 128;                 // last brightness the sender asked for (WLED "bri")
 static void backlight() {
   int v = 0;
-  if (on) v = S.follow ? map(bri, 0, 255, S.blMin, S.blMax) : S.blMax;
+  // square root: a dim LED sign (bri 7 of 255) still gives a readable screen
+  if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
   ledcWrite(0, blDuty);
 }
@@ -146,7 +155,6 @@ static void backlight() {
 // ---------- network ----------
 static WebServer web(80);
 static DNSServer dns;
-static WiFiUDP udp;
 static bool apOn = false;
 static uint32_t wifiLostAt = 0;
 static String apName;
@@ -187,27 +195,63 @@ static int fps = 0;
 static IPAddress liveFrom;
 static bool idleShown = false;
 
-static void handleDdp() {
+// The pixels arrive on their own task (core 0) so no packet is lost while the main loop draws or serves pages.
+static void rxTask(void *) {
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  sockaddr_in a = {};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(4048);
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind(sock, (sockaddr *)&a, sizeof a);
+  int rcv = 64 * 1024;
+  setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
   static uint8_t pkt[1500];
-  int n;
-  while ((n = udp.parsePacket()) > 0) {
-    if (n > (int)sizeof(pkt)) { udp.flush(); continue; }
-    udp.read(pkt, n);
-    if (n < 10 || (pkt[0] & 0xC0) != 0x40) continue;       // DDP version 1 only
-    int hdr = (pkt[0] & 0x10) ? 14 : 10;                     // timecode adds 4 bytes
+  for (;;) {
+    sockaddr_in from;
+    socklen_t fl = sizeof from;
+    int n = recvfrom(sock, pkt, sizeof pkt, 0, (sockaddr *)&from, &fl);
+    if (n < 10 || (pkt[0] & 0xC0) != 0x40) continue;          // DDP version 1 only
+    int hdr = (pkt[0] & 0x10) ? 14 : 10;                        // timecode adds 4 bytes
     uint32_t off = ((uint32_t)pkt[4] << 24) | (pkt[5] << 16) | (pkt[6] << 8) | pkt[7];
     uint32_t len = (pkt[8] << 8) | pkt[9];
     if (pkt[3] == 251 || pkt[3] == 254 || hdr + (int)len > n) continue;  // config/status queries: ignore
-    uint32_t total = (uint32_t)S.w * S.h * 3;
-    if (off < total) memcpy(rx + off, pkt + hdr, min(len, total - off));
-    if (pkt[0] & 0x01) {                                      // PUSH: show the frame
-      if (idleShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; }
-      lastFrameAt = millis();
-      liveFrom = udp.remoteIP();
-      if (on) render();
-      frames++;
+    xSemaphoreTake(bufLock, portMAX_DELAY);
+    uint32_t total = (uint32_t)curW * curH * 3;
+    if (off < total) memcpy(bufs[wIdx] + off, pkt + hdr, min(len, total - off));
+    if (pkt[0] & 0x01) {                                         // PUSH: this frame is complete
+      if (readyIdx >= 0) { int t = readyIdx; readyIdx = wIdx; wIdx = t; rxDropped++; }   // replace an undrawn frame
+      else { readyIdx = wIdx; wIdx = 3 - readyIdx - drawIdx; }
+      lastPushMs = millis();
+      rxFrom = from.sin_addr.s_addr;
     }
+    xSemaphoreGive(bufLock);
   }
+}
+
+// Change what's being shown (size and look). Not saved: Signinator sets it again after a restart.
+static void setLook(int w, int h, bool pixels) {
+  w = constrain(w, 1, MAX_W);
+  h = constrain(h, 1, MAX_H);
+  if (w == curW && h == curH && pixels == pixelLook) return;
+  xSemaphoreTake(bufLock, portMAX_DELAY);
+  curW = w; curH = h; pixelLook = pixels;
+  for (auto &b : bufs) memset(b, 0, (size_t)MAX_W * MAX_H * 3);
+  readyIdx = -1;
+  xSemaphoreGive(bufLock);
+  layout();
+}
+
+static void drawNewFrame() {
+  int idx = -1;
+  xSemaphoreTake(bufLock, portMAX_DELAY);
+  if (readyIdx >= 0) { drawIdx = readyIdx; readyIdx = -1; idx = drawIdx; }
+  xSemaphoreGive(bufLock);
+  if (idx < 0) return;
+  if (idleShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; }
+  lastFrameAt = millis();
+  liveFrom = IPAddress(rxFrom);
+  if (on) render(bufs[idx]);
+  frames++;
 }
 
 static bool live() { return lastFrameAt && millis() - lastFrameAt < LIVE_TIMEOUT_MS; }
@@ -261,7 +305,7 @@ static void hideOverlay() {
   overlayTop = TFT_H;
   gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK);
   forceRedraw = true;
-  if (live()) render(); else showIdle();
+  if (live()) render(bufs[drawIdx]); else showIdle();
 }
 
 // ---------- touch (GT911) ----------
@@ -326,6 +370,11 @@ static void fillInfo(JsonObject i) {
   dg["blDuty"] = blDuty;
   dg["blFreq"] = blFreq;
   dg["idle"] = idleShown;
+  dg["dropped"] = rxDropped;
+  JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
+  mx["w"] = curW;
+  mx["h"] = curH;
+  mx["look"] = pixelLook ? "pixels" : "dots";
   JsonObject l = i["leds"].to<JsonObject>();
   l["count"] = S.w * S.h;
   l["fps"] = fps;
@@ -357,8 +406,8 @@ static void handleRoot() {
        " &middot; " + (live() ? String(fps) + " fps from " + liveFrom.toString() : "waiting for pixels") + "</p>";
   h += "<form method=post action=/settings><fieldset><legend>Matrix</legend>"
        "<label>Name<input type=text name=name value=\"" + esc(S.name) + "\"></label>"
-       "<label>Width (LEDs)<input type=number min=1 max=128 name=w value=" + String(S.w) + "></label>"
-       "<label>Height (LEDs)<input type=number min=1 max=128 name=h value=" + String(S.h) + "></label>"
+       "<label>Width (LEDs)<input type=number min=1 max=240 name=w value=" + String(S.w) + "></label>"
+       "<label>Height (LEDs)<input type=number min=1 max=240 name=h value=" + String(S.h) + "></label>"
        "<label><input type=checkbox name=unlit " + (S.unlit ? "checked" : "") + "> Show unlit LEDs as dark dots</label>"
        "<p class=note>Set the same size as the LED sign. Signinator reads it from /json/info like it does from WLED.</p></fieldset>"
        "<fieldset><legend>Backlight</legend>"
@@ -394,7 +443,7 @@ static void handleSettings() {
   backlight();
   web.sendHeader("Location", "/");
   web.send(303);
-  if (sizeChanged) { layout(); showIdle(); }
+  if (sizeChanged && !pixelLook) { setLook(S.w, S.h, false); showIdle(); }
   if (wifiChanged) { delay(300); ESP.restart(); }
 }
 
@@ -481,6 +530,15 @@ static void setupWeb() {
     }
     web.send(200, "text/plain", String("gfx=") + gfxOk + " fb=" + (fb != nullptr) + " duty=" + blDuty + " freq=" + blFreq);
   });
+  web.on("/api/look", HTTP_POST, [] {   // {"look":"pixels","w":120,"h":120} or {"look":"dots"} (the saved size)
+    JsonDocument in;
+    if (deserializeJson(in, web.arg("plain")) != DeserializationError::Ok) { web.send(400, "text/plain", "bad JSON"); return; }
+    bool px = String(in["look"] | "dots") == "pixels";
+    if (px) setLook(in["w"] | 120, in["h"] | 120, true);
+    else setLook(S.w, S.h, false);
+    if (!live()) showIdle();
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
   web.on("/api/overlay", HTTP_POST, [] {   // Signinator sends the song so a tap can show it
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) == DeserializationError::Ok) {
@@ -512,6 +570,8 @@ void setup() {
                                 sizeof(st7701_4848s040_init));
   gfxOk = gfx->begin(GFX_NOT_DEFINED);
   fb = gfx->getFramebuffer();
+  bufLock = xSemaphoreCreateMutex();
+  curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
   layout();
   backlight();
@@ -538,14 +598,14 @@ void setup() {
     MDNS.addService("http", "tcp", 80);
     MDNS.addService("wled", "tcp", 80);
   }
-  udp.begin(4048);
+  xTaskCreatePinnedToCore(rxTask, "ddp", 6144, nullptr, 5, nullptr, 0);
   setupWeb();
   showIdle();
 }
 
 void loop() {
   improv::loop();
-  handleDdp();
+  drawNewFrame();
   web.handleClient();
   if (apOn) dns.processNextRequest();
 
