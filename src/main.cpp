@@ -89,6 +89,7 @@ static SemaphoreHandle_t bufLock;
 static volatile uint32_t lastPushMs = 0, rxFrom = 0, rxDropped = 0;
 static int cell, dot, ox, oy;        // layout of the dots on the screen
 static uint8_t *mask;                // cell*cell: 1 = inside the round dot
+static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts and how wide it is
 static bool forceRedraw = true;
 static int overlayTop = TFT_H;       // rows from here down belong to the overlay while it shows
 
@@ -112,6 +113,15 @@ static void layout() {
       float dx = x - c, dy = y - c;
       mask[y * cell + x] = pixelLook ? 1 : (dot >= 4) ? (dx * dx + dy * dy <= r * r) : (x < dot && y < dot);
     }
+  free(spanS); free(spanL);
+  spanS = (int16_t *)malloc(cell * sizeof(int16_t));
+  spanL = (int16_t *)malloc(cell * sizeof(int16_t));
+  for (int y = 0; y < cell; y++) {         // a round dot is one run of pixels per line
+    int a = -1, b = -1;
+    for (int x = 0; x < cell; x++) if (mask[y * cell + x]) { if (a < 0) a = x; b = x; }
+    spanS[y] = a < 0 ? 0 : a;
+    spanL[y] = a < 0 ? 0 : b - a + 1;
+  }
   size_t n = (size_t)MAX_W * MAX_H * 3;   // allocated once at the largest size
   for (auto &b : bufs) if (!b) b = (uint8_t *)ps_calloc(n, 1);
   if (!shown) shown = (uint8_t *)ps_calloc(n, 1);
@@ -140,17 +150,21 @@ static void render(const uint8_t *rx) {
         colors[lx] = (!pixelLook && S.unlit && p[0] < 10 && p[1] < 10 && p[2] < 10)
                          ? rgb565(24, 24, 24) : rgb565(dimLut[p[0]], dimLut[p[1]], dimLut[p[2]]);
       }
-      for (int y = 0; y < cell; y++) {
-        // squares: every line of the row is the same, build it once; dots: each line follows the dot's shape
-        if (y == 0 || !pixelLook) {
-          const uint8_t *m = mask + y * cell;
-          uint16_t *ln = lineBuf + ox;
+      if (pixelLook) {                     // squares: build one line, copy it down
+        uint16_t *ln = lineBuf + ox;
+        for (int lx = 0; lx < curW; lx++) { uint16_t c = colors[lx]; for (int k = 0; k < cell; k++) *ln++ = c; }
+        for (int y = 0; y < cell; y++) memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
+      } else {                             // dots: write only the dot's run on each line (gaps stay black)
+        for (int y = 0; y < cell; y++) {
+          int len = spanL[y];
+          if (!len) continue;
+          uint16_t *line = fb + (py + y) * TFT_W + ox + spanS[y];
           for (int lx = 0; lx < curW; lx++) {
             uint16_t c = colors[lx];
-            for (int k = 0; k < cell; k++) *ln++ = m[k] ? c : BLACK;
+            uint16_t *d = line + lx * cell;
+            for (int k = 0; k < len; k++) d[k] = c;
           }
         }
-        memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
       }
       yMin = min(yMin, py);
       yMax = max(yMax, py + cell - 1);
