@@ -154,7 +154,14 @@ static void render(const uint8_t *rx) {
         uint16_t *ln = lineBuf + ox;
         for (int lx = 0; lx < curW; lx++) { uint16_t c = colors[lx]; for (int k = 0; k < cell; k++) *ln++ = c; }
         for (int y = 0; y < cell; y++) memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
-      } else {                             // dots: write only the dot's run on each line (gaps stay black)
+      } else if (cell < 12) {              // small dots: build each line (dots + gaps) and copy it whole
+        for (int y = 0; y < cell; y++) {
+          const uint8_t *m = mask + y * cell;
+          uint16_t *ln = lineBuf + ox;
+          for (int lx = 0; lx < curW; lx++) { uint16_t c = colors[lx]; for (int k = 0; k < cell; k++) *ln++ = m[k] ? c : BLACK; }
+          memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
+        }
+      } else {                             // big dots: write only the dot's run on each line (gaps stay black)
         for (int y = 0; y < cell; y++) {
           int len = spanL[y];
           if (!len) continue;
