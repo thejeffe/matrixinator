@@ -91,6 +91,8 @@ static int cell, dot, ox, oy;        // layout of the dots on the screen
 static uint8_t *mask;                // cell*cell: 1 = inside the round dot
 static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts and how wide it is
 static bool forceRedraw = true;
+static bool idleShown = false;     // the idle screen (Matrix rain) is showing
+static void mrStep();
 static int overlayTop = TFT_H;       // rows from here down belong to the overlay while it shows
 
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
@@ -242,7 +244,6 @@ static void stopAp() {
 static uint32_t lastFrameAt = 0, frames = 0, fpsAt = 0;
 static int fps = 0;
 static IPAddress liveFrom;
-static bool idleShown = false;
 static bool photoShown = false;    // a photo (album art etc.) is on the screen, not LED dots
 
 // The pixels arrive on their own task (core 0) so no packet is lost while the main loop draws or serves pages.
