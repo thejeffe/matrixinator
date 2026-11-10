@@ -73,7 +73,9 @@ static Arduino_RGB_Display *gfx;
 static uint16_t *fb;
 static bool gfxOk = false;
 static uint8_t touchAddr = 0;
-static int blDuty = -1, blFreq = 5000;
+static int blDuty = -1;                // brightness level applied to the picture (0-255)
+static uint8_t dimLut[256];            // colour level -> dimmed level
+static int dimFor = -1;
 // What's being shown: the saved matrix size as round "LED" dots, or (sent by Signinator for its "full resolution"
 // look) a bigger picture drawn as plain square pixels. Three receive buffers: the receiver task writes one,
 // one waits to be drawn, one is being drawn.
@@ -125,7 +127,8 @@ static void render(const uint8_t *rx) {
       uint8_t r = rx[i], g = rx[i + 1], b = rx[i + 2];
       if (!forceRedraw && r == shown[i] && g == shown[i + 1] && b == shown[i + 2]) continue;
       shown[i] = r; shown[i + 1] = g; shown[i + 2] = b;
-      uint16_t c = (!pixelLook && S.unlit && r < 10 && g < 10 && b < 10) ? rgb565(24, 24, 24) : rgb565(r, g, b);
+      uint16_t c = (!pixelLook && S.unlit && r < 10 && g < 10 && b < 10) ? rgb565(24, 24, 24)
+                                                                          : rgb565(dimLut[r], dimLut[g], dimLut[b]);
       int px = ox + lx * cell;
       for (int y = 0; y < cell; y++) {
         uint16_t *row = fb + (py + y) * TFT_W + px;
@@ -144,12 +147,18 @@ static void render(const uint8_t *rx) {
 // ---------- backlight ----------
 static bool on = true;
 static int bri = 128;                 // last brightness the sender asked for (WLED "bri")
+// This board's backlight doesn't follow PWM dimming (it stays dark), so the backlight is simply on or off and the
+// brightness is applied to the picture itself (square-root curve: a dim LED sign still gives a readable screen).
 static void backlight() {
   int v = 0;
-  // square root: a dim LED sign (bri 7 of 255) still gives a readable screen
   if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
-  ledcWrite(0, blDuty);
+  digitalWrite(TFT_BCKL, (on && blDuty > 0) ? HIGH : LOW);
+  if (blDuty != dimFor) {
+    for (int i = 0; i < 256; i++) dimLut[i] = (uint8_t)((i * blDuty + 127) / 255);
+    dimFor = blDuty;
+    forceRedraw = true;          // redraw every LED at the new level
+  }
 }
 
 // ---------- network ----------
@@ -368,7 +377,6 @@ static void fillInfo(JsonObject i) {
   dg["psramFree"] = ESP.getFreePsram();
   dg["touch"] = touchAddr;
   dg["blDuty"] = blDuty;
-  dg["blFreq"] = blFreq;
   dg["idle"] = idleShown;
   dg["dropped"] = rxDropped;
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
@@ -410,7 +418,7 @@ static void handleRoot() {
        "<label>Height (LEDs)<input type=number min=1 max=240 name=h value=" + String(S.h) + "></label>"
        "<label><input type=checkbox name=unlit " + (S.unlit ? "checked" : "") + "> Show unlit LEDs as dark dots</label>"
        "<p class=note>Set the same size as the LED sign. Signinator reads it from /json/info like it does from WLED.</p></fieldset>"
-       "<fieldset><legend>Backlight</legend>"
+       "<fieldset><legend>Brightness</legend>"
        "<label><input type=checkbox name=follow " + (S.follow ? "checked" : "") + "> Follow the brightness Signinator sends</label>"
        "<label>Brightest (10-255)<input type=number min=10 max=255 name=blmax value=" + String(S.blMax) + "></label>"
        "<label>Dimmest (0-255)<input type=number min=0 max=255 name=blmin value=" + String(S.blMin) + "></label></fieldset>"
@@ -520,15 +528,13 @@ static void setupWeb() {
     sendJson(d);
   });
   web.on("/api/test", HTTP_GET, [] {      // troubleshooting: /api/test?color=ff0000&duty=255&freq=5000
-    if (web.hasArg("freq")) { blFreq = constrain(web.arg("freq").toInt(), 50, 40000); ledcSetup(0, blFreq, 8); ledcAttachPin(TFT_BCKL, 0); }
-    if (web.hasArg("duty")) { blDuty = constrain(web.arg("duty").toInt(), 0, 255); ledcWrite(0, blDuty); }
-    if (web.hasArg("pin")) { int v = web.arg("pin").toInt(); ledcDetachPin(TFT_BCKL); pinMode(TFT_BCKL, OUTPUT); digitalWrite(TFT_BCKL, v ? HIGH : LOW); }
+    if (web.hasArg("pin")) digitalWrite(TFT_BCKL, web.arg("pin").toInt() ? HIGH : LOW);
     if (web.hasArg("color")) {
       uint32_t c = strtoul(web.arg("color").c_str(), nullptr, 16);
       gfx->fillScreen(rgb565(c >> 16, c >> 8, c));
       idleShown = true;   // the next pixels or idle check redraw over it
     }
-    web.send(200, "text/plain", String("gfx=") + gfxOk + " fb=" + (fb != nullptr) + " duty=" + blDuty + " freq=" + blFreq);
+    web.send(200, "text/plain", String("gfx=") + gfxOk + " fb=" + (fb != nullptr) + " level=" + blDuty);
   });
   web.on("/api/look", HTTP_POST, [] {   // {"look":"pixels","w":120,"h":120} or {"look":"dots"} (the saved size)
     JsonDocument in;
@@ -558,9 +564,8 @@ static void setupWeb() {
 void setup() {
   Serial.begin(115200);
   loadSettings();
-  ledcSetup(0, 5000, 8);
-  ledcAttachPin(TFT_BCKL, 0);
-  ledcWrite(0, 0);
+  pinMode(TFT_BCKL, OUTPUT);
+  digitalWrite(TFT_BCKL, LOW);
 
   bus = new Arduino_SWSPI(GFX_NOT_DEFINED, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
   rgbpanel = new Arduino_ESP32RGBPanel(TFT_DE, TFT_VSYNC, TFT_HSYNC, TFT_PCLK, TFT_R0, TFT_R1, TFT_R2, TFT_R3, TFT_R4,
