@@ -80,7 +80,8 @@ static int dimFor = -1;
 // look) a bigger picture drawn as plain square pixels. Three receive buffers: the receiver task writes one,
 // one waits to be drawn, one is being drawn.
 static int curW = 32, curH = 32;
-static bool pixelLook = false;
+static bool pixelLook = false;       // draw square pixels instead of round LED dots
+static bool customSize = false;      // size set by the sender (Signinator's full-resolution look), not the saved one
 static uint8_t *bufs[3] = {nullptr, nullptr, nullptr}, *shown = nullptr;
 static int wIdx = 0, readyIdx = -1, drawIdx = 2;
 static SemaphoreHandle_t bufLock;
@@ -97,7 +98,8 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 static void layout() {
   cell = min(TFT_W / curW, TFT_H / curH);
   if (cell < 1) cell = 1;
-  int gap = (!pixelLook && cell >= 6) ? max(1, cell / 7) : 0;
+  // dots at every size: a dark gap between LEDs (1 pixel when they're small)
+  int gap = pixelLook ? 0 : cell >= 6 ? max(1, cell / 7) : cell >= 2 ? 1 : 0;
   dot = cell - gap;
   ox = (TFT_W - curW * cell) / 2;
   oy = (TFT_H - curH * cell) / 2;
@@ -121,8 +123,10 @@ static uint16_t lineBuf[TFT_W];        // one screen line (internal RAM), copied
 
 static void render(const uint8_t *rx) {
   int yMin = TFT_H, yMax = -1;
-  if (pixelLook) {                       // square pixels: build one line per row, copy it `cell` times
+  {                                      // one row of LEDs at a time: build each screen line, then copy it
     const size_t rowBytes = (size_t)curW * 3;
+    const size_t n = (size_t)curW * cell * 2;
+    static uint16_t colors[MAX_W];
     for (int ly = 0; ly < curH; ly++) {
       int py = oy + ly * cell;
       if (py + cell > overlayTop) break;
@@ -130,14 +134,23 @@ static void render(const uint8_t *rx) {
       uint8_t *old = shown + ly * rowBytes;
       if (!forceRedraw && memcmp(src, old, rowBytes) == 0) continue;
       memcpy(old, src, rowBytes);
-      uint16_t *ln = lineBuf + ox;
       for (int lx = 0; lx < curW; lx++) {
         const uint8_t *p = src + lx * 3;
-        uint16_t c = rgb565(dimLut[p[0]], dimLut[p[1]], dimLut[p[2]]);
-        for (int k = 0; k < cell; k++) *ln++ = c;
+        colors[lx] = (!pixelLook && S.unlit && p[0] < 10 && p[1] < 10 && p[2] < 10)
+                         ? rgb565(24, 24, 24) : rgb565(dimLut[p[0]], dimLut[p[1]], dimLut[p[2]]);
       }
-      size_t n = (size_t)curW * cell * 2;
-      for (int y = 0; y < cell; y++) memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
+      for (int y = 0; y < cell; y++) {
+        // squares: every line of the row is the same, build it once; dots: each line follows the dot's shape
+        if (y == 0 || !pixelLook) {
+          const uint8_t *m = mask + y * cell;
+          uint16_t *ln = lineBuf + ox;
+          for (int lx = 0; lx < curW; lx++) {
+            uint16_t c = colors[lx];
+            for (int k = 0; k < cell; k++) *ln++ = m[k] ? c : BLACK;
+          }
+        }
+        memcpy(fb + (py + y) * TFT_W + ox, lineBuf + ox, n);
+      }
       yMin = min(yMin, py);
       yMax = max(yMax, py + cell - 1);
     }
@@ -145,29 +158,7 @@ static void render(const uint8_t *rx) {
     if (yMax >= yMin) Cache_WriteBack_Addr((uint32_t)(fb + yMin * TFT_W), (yMax - yMin + 1) * TFT_W * 2);
     return;
   }
-  for (int ly = 0; ly < curH; ly++) {
-    int py = oy + ly * cell;
-    if (py + cell > overlayTop) break;
-    for (int lx = 0; lx < curW; lx++) {
-      int i = (ly * curW + lx) * 3;
-      uint8_t r = rx[i], g = rx[i + 1], b = rx[i + 2];
-      if (!forceRedraw && r == shown[i] && g == shown[i + 1] && b == shown[i + 2]) continue;
-      shown[i] = r; shown[i + 1] = g; shown[i + 2] = b;
-      uint16_t c = (!pixelLook && S.unlit && r < 10 && g < 10 && b < 10) ? rgb565(24, 24, 24)
-                                                                          : rgb565(dimLut[r], dimLut[g], dimLut[b]);
-      int px = ox + lx * cell;
-      for (int y = 0; y < cell; y++) {
-        uint16_t *row = fb + (py + y) * TFT_W + px;
-        if (pixelLook) { for (int x = 0; x < cell; x++) row[x] = c; continue; }
-        const uint8_t *m = mask + y * cell;
-        for (int x = 0; x < cell; x++) row[x] = m[x] ? c : BLACK;
-      }
-      yMin = min(yMin, py);
-      yMax = max(yMax, py + cell - 1);
-    }
-  }
-  forceRedraw = false;
-  if (yMax >= yMin) Cache_WriteBack_Addr((uint32_t)(fb + yMin * TFT_W), (yMax - yMin + 1) * TFT_W * 2);
+
 }
 
 // ---------- backlight ----------
@@ -264,12 +255,13 @@ static void rxTask(void *) {
 }
 
 // Change what's being shown (size and look). Not saved: Signinator sets it again after a restart.
-static void setLook(int w, int h, bool pixels) {
+static void setLook(int w, int h, bool squares, bool custom) {
   w = constrain(w, 1, MAX_W);
   h = constrain(h, 1, MAX_H);
-  if (w == curW && h == curH && pixels == pixelLook) return;
+  customSize = custom;
+  if (w == curW && h == curH && squares == pixelLook) return;
   xSemaphoreTake(bufLock, portMAX_DELAY);
-  curW = w; curH = h; pixelLook = pixels;
+  curW = w; curH = h; pixelLook = squares;
   for (auto &b : bufs) memset(b, 0, (size_t)MAX_W * MAX_H * 3);
   readyIdx = -1;
   xSemaphoreGive(bufLock);
@@ -408,7 +400,8 @@ static void fillInfo(JsonObject i) {
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
   mx["w"] = curW;
   mx["h"] = curH;
-  mx["look"] = pixelLook ? "pixels" : "dots";
+  mx["look"] = customSize ? "pixels" : "dots";
+  mx["shape"] = pixelLook ? "squares" : "dots";
   JsonObject l = i["leds"].to<JsonObject>();
   l["count"] = S.w * S.h;
   l["fps"] = fps;
@@ -477,7 +470,7 @@ static void handleSettings() {
   backlight();
   web.sendHeader("Location", "/");
   web.send(303);
-  if (sizeChanged && !pixelLook) { setLook(S.w, S.h, false); showIdle(); }
+  if (sizeChanged && !customSize) { setLook(S.w, S.h, false, false); showIdle(); }
   if (wifiChanged) { delay(300); ESP.restart(); }
 }
 
@@ -562,12 +555,13 @@ static void setupWeb() {
     }
     web.send(200, "text/plain", String("gfx=") + gfxOk + " fb=" + (fb != nullptr) + " level=" + blDuty);
   });
-  web.on("/api/look", HTTP_POST, [] {   // {"look":"pixels","w":120,"h":120} or {"look":"dots"} (the saved size)
+  // {"look":"pixels","w":120,"h":120,"shape":"dots"|"squares"} = the sender's size; {"look":"dots"} = the saved size
+  web.on("/api/look", HTTP_POST, [] {
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) != DeserializationError::Ok) { web.send(400, "text/plain", "bad JSON"); return; }
     bool px = String(in["look"] | "dots") == "pixels";
-    if (px) setLook(in["w"] | 120, in["h"] | 120, true);
-    else setLook(S.w, S.h, false);
+    if (px) setLook(in["w"] | 120, in["h"] | 120, String(in["shape"] | "squares") == "squares", true);
+    else setLook(S.w, S.h, false, false);
     if (!live()) showIdle();
     web.send(200, "application/json", "{\"ok\":true}");
   });
