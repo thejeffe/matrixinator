@@ -460,6 +460,121 @@ static void centered(const String &s, int y, int size, uint16_t color) {
   gfx->print(s);
 }
 
+// ---------- logo: green digital rain on LED dots; an "M" rains into place ----------
+// Shown at boot, and with a progress bar while a firmware update is written (input is ignored then).
+static const int LG = 32, LCELL = 12, LOX = (TFT_W - LG * LCELL) / 2, LOY = 10;
+static uint8_t logoMask[LG * LG], logoLit[LG * LG];
+static float logoGlow[LG * LG], dropY[LG], dropV[LG];
+static uint16_t logoPrev[LG * LG];
+static int16_t logoSpanS[LCELL], logoSpanL[LCELL];
+static volatile bool updating = false;
+static size_t upTotal = 0, upDone = 0;
+static uint32_t upAnimAt = 0;
+
+static void logoInit() {
+  memset(logoMask, 0, sizeof logoMask);
+  memset(logoLit, 0, sizeof logoLit);
+  for (int i = 0; i < LG * LG; i++) { logoGlow[i] = 0; logoPrev[i] = 0xFFFF; }
+  auto set = [](int x, int y) { if (x >= 0 && x < LG && y >= 0 && y < LG) logoMask[y * LG + x] = 1; };
+  for (int y = 7; y <= 24; y++)                     // the two legs of the M
+    for (int k = 0; k < 3; k++) { set(5 + k, y); set(24 + k, y); }
+  for (int i = 0; i <= 9; i++) {                    // the two diagonals, meeting in the middle
+    int y = 7 + i, xl = 8 + (i * 7) / 9, xr = 23 - (i * 7) / 9;
+    for (int k = 0; k < 2; k++) { set(xl + k, y); set(xr - k, y); }
+  }
+  float r = (LCELL - 2) / 2.0f, c = (LCELL - 1) / 2.0f;
+  for (int y = 0; y < LCELL; y++) {                 // a round dot: one run of pixels per line
+    float dy = y - c, w = r * r - dy * dy;
+    if (w < 0) { logoSpanS[y] = 0; logoSpanL[y] = 0; continue; }
+    int half = (int)floorf(sqrtf(w) + 0.5f);
+    logoSpanS[y] = max(0, (int)lroundf(c) - half);
+    logoSpanL[y] = min(LCELL - logoSpanS[y], 2 * half + 1);
+  }
+  for (int x = 0; x < LG; x++) { dropY[x] = -(float)(esp_random() % 40); dropV[x] = 0.35f + (esp_random() % 70) / 100.0f; }
+}
+
+static void logoStep(bool revealAll) {
+  for (int i = 0; i < LG * LG; i++) logoGlow[i] *= 0.80f;
+  for (int x = 0; x < LG; x++) {
+    dropY[x] += dropV[x];
+    int hy = (int)dropY[x];
+    if (hy >= 0 && hy < LG) {
+      logoGlow[hy * LG + x] = 2.0f;                 // > 1: the bright head of the drop
+      if (logoMask[hy * LG + x]) logoLit[hy * LG + x] = 1;
+    }
+    if (dropY[x] > LG + 12) { dropY[x] = -(float)(esp_random() % 24); dropV[x] = 0.35f + (esp_random() % 70) / 100.0f; }
+  }
+  if (revealAll) memcpy(logoLit, logoMask, sizeof logoLit);
+}
+
+static void logoDraw() {
+  int yMin = TFT_H, yMax = -1;
+  for (int y = 0; y < LG; y++)
+    for (int x = 0; x < LG; x++) {
+      int i = y * LG + x;
+      float g = logoGlow[i];
+      uint16_t c;
+      if (g > 1.0f) c = rgb565(190, 255, 190);                                     // drop head
+      else if (logoLit[i]) c = rgb565(40, 255, 90);                                // the M, lit for good
+      else { int v = (int)(g * 210); c = v > 6 ? rgb565(0, v, v / 6) : rgb565(10, 22, 12); }   // tail / unlit dot
+      if (c == logoPrev[i]) continue;
+      logoPrev[i] = c;
+      int px = LOX + x * LCELL, py = LOY + y * LCELL;
+      for (int k = 0; k < LCELL; k++) {
+        int len = logoSpanL[k];
+        if (!len) continue;
+        uint16_t *d = fb + (py + k) * TFT_W + px + logoSpanS[k];
+        for (int j = 0; j < len; j++) d[j] = c;
+      }
+      yMin = min(yMin, py); yMax = max(yMax, py + LCELL - 1);
+    }
+  if (yMax >= yMin) Cache_WriteBack_Addr((uint32_t)(fb + yMin * TFT_W), (yMax - yMin + 1) * TFT_W * 2);
+}
+
+static const int LOGO_TEXT_Y = LOY + LG * LCELL + 8;
+
+static void bootLogo() {
+  gfx->fillScreen(BLACK);
+  logoInit();
+  digitalWrite(TFT_BCKL, HIGH);
+  uint32_t t0 = millis();
+  bool titled = false;
+  while (millis() - t0 < 3200) {
+    uint32_t f0 = millis();
+    logoStep(millis() - t0 > 2200);                 // the M is complete for the last second
+    logoDraw();
+    if (!titled && millis() - t0 > 1600) {
+      centered("MATRIXINATOR", LOGO_TEXT_Y + 6, 4, rgb565(40, 255, 90));
+      centered(String("v") + VERSION, LOGO_TEXT_Y + 46, 1, rgb565(20, 120, 50));
+      titled = true;
+    }
+    improv::loop();
+    int wait = 33 - (int)(millis() - f0);
+    if (wait > 0) delay(wait);
+  }
+}
+
+static void updateScreen(const char *msg, uint16_t color) {
+  gfx->fillRect(0, LOGO_TEXT_Y, TFT_W, TFT_H - LOGO_TEXT_Y, BLACK);
+  centered(msg, LOGO_TEXT_Y + 4, 3, color);
+}
+
+static void updateProgress() {
+  const int bw = 360, bx = (TFT_W - bw) / 2, by = LOGO_TEXT_Y + 40, bh = 12;
+  gfx->drawRect(bx - 2, by - 2, bw + 4, bh + 4, rgb565(20, 120, 50));
+  int fill = upTotal ? (int)((uint64_t)bw * min(upDone, upTotal) / upTotal) : (int)((millis() / 8) % bw);
+  gfx->fillRect(bx, by, fill, bh, rgb565(40, 255, 90));
+  if (fill < bw) gfx->fillRect(bx + fill, by, bw - fill, bh, BLACK);
+}
+
+static void updateAnimate() {           // called while the update is written: keep the rain going
+  if (millis() - upAnimAt < 40) return;
+  upAnimAt = millis();
+  logoStep(true);
+  logoDraw();
+  updateProgress();
+}
+
 static void showIdle() {
   gfx->fillScreen(BLACK);
   centered(S.name, 170, 4, WHITE);
@@ -627,6 +742,7 @@ static void handleRoot() {
 }
 
 static void handleSettings() {
+  if (updating) { web.send(503, "text/plain", "Updating firmware"); return; }
   bool wifiChanged = false, sizeChanged = false;
   if (web.hasArg("name") && web.arg("name").length()) S.name = web.arg("name").substring(0, 40);
   int w = web.hasArg("w") ? constrain(web.arg("w").toInt(), 1, MAX_W) : S.w;
@@ -652,16 +768,32 @@ static void handleUpdateDone() {
   bool ok = !Update.hasError();
   web.sendHeader("Access-Control-Allow-Origin", "*");
   web.send(ok ? 200 : 500, "text/plain", ok ? "Update done, restarting." : "Update failed.");
-  if (ok) { delay(500); ESP.restart(); }
+  if (ok) { updateScreen("RESTARTING...", rgb565(40, 255, 90)); delay(700); ESP.restart(); }
+  updateScreen("UPDATE FAILED", RED);
+  delay(2500);
+  updating = false;
+  gfx->fillScreen(BLACK); forceRedraw = true; photoShown = false;
+  showIdle();
 }
 static void handleUpdateUpload() {
   HTTPUpload &u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
+    updating = true;                         // from here on: taps, pixels, photos and settings are ignored
+    overlayUntil = 0; overlayTop = TFT_H;
+    upTotal = web.clientContentLength() > 0 ? web.clientContentLength() : 0;
+    upDone = 0;
+    digitalWrite(TFT_BCKL, HIGH);
     gfx->fillScreen(BLACK);
-    centered("Updating firmware...", 220, 3, YELLOW);
+    logoInit();
+    logoStep(true);
+    logoDraw();
+    updateScreen("FIRMWARE UPDATE", rgb565(40, 255, 90));
+    centered("Don't unplug", LOGO_TEXT_Y + 62, 1, rgb565(20, 120, 50));
     Update.begin(UPDATE_SIZE_UNKNOWN);
   } else if (u.status == UPLOAD_FILE_WRITE) {
     Update.write(u.buf, u.currentSize);
+    upDone += u.currentSize;
+    updateAnimate();
   } else if (u.status == UPLOAD_FILE_END) {
     Update.end(true);
   } else if (u.status == UPLOAD_FILE_ABORTED) {
@@ -670,6 +802,7 @@ static void handleUpdateUpload() {
 }
 
 static void handleState() {
+  if (web.method() == HTTP_POST && updating) { web.send(503, "text/plain", "Updating firmware"); return; }
   if (web.method() == HTTP_POST) {
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) == DeserializationError::Ok) {
@@ -731,6 +864,7 @@ static void setupWeb() {
   });
   // {"look":"pixels","w":120,"h":120,"shape":"dots"|"squares"} = the sender's size; {"look":"dots"} = the saved size
   web.on("/api/look", HTTP_POST, [] {
+    if (updating) { web.send(503, "text/plain", "Updating firmware"); return; }
     JsonDocument in;
     if (deserializeJson(in, web.arg("plain")) != DeserializationError::Ok) { web.send(400, "text/plain", "bad JSON"); return; }
     bool px = String(in["look"] | "dots") == "pixels";
@@ -740,6 +874,7 @@ static void setupWeb() {
     web.send(200, "application/json", "{\"ok\":true}");
   });
   web.on("/api/photo", HTTP_POST, [] {
+    if (updating) { web.send(503, "text/plain", "Updating firmware"); return; }
     bool ok = photoOk;
     web.send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
     if (ok) { liveFrom = web.client().remoteIP(); showPhoto(photoBuf, photoLen, 1); }
@@ -799,6 +934,7 @@ void setup() {
   char ap[32];
   snprintf(ap, sizeof ap, "Matrixinator-%02X%02X", mac[4], mac[5]);
   apName = ap;
+  bootLogo();
   showIdle();
 
   improv::begin({[](const String &s, const String &p) {
@@ -824,6 +960,7 @@ void setup() {
 }
 
 void loop() {
+  if (updating) { web.handleClient(); delay(1); return; }   // firmware update: nothing else happens
   improv::loop();
   drawStreamPhoto();
   drawNewFrame();
