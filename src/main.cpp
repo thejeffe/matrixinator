@@ -96,6 +96,8 @@ static bool asleep = false;        // nothing to show: backlight off until pixel
 static uint32_t idleSince = 0, peekUntil = 0;
 static const uint32_t IDLE_SLEEP_MS = 15000;
 static String npTitle, npArtist;        // the song (from Signinator), shown on a tap
+static void goDark();
+static void wakeAfterDraw(bool wasAsleep);
 static void mrStep();
 static int overlayTop = TFT_H;       // rows from here down belong to the overlay while it shows
 
@@ -315,12 +317,12 @@ static void drawNewFrame() {
   if (readyIdx >= 0) { drawIdx = readyIdx; readyIdx = -1; idx = drawIdx; }
   xSemaphoreGive(bufLock);
   if (idx < 0) return;
-  if (asleep) { asleep = false; backlight(); }        // something to show: wake up
+  bool wasAsleep = asleep;
   idleSince = 0; peekUntil = 0;
   if (idleShown || photoShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; photoShown = false; }
   lastFrameAt = millis();
   liveFrom = IPAddress(rxFrom);
-  if (on) render(bufs[idx]);
+  if (on) { render(bufs[idx]); wakeAfterDraw(wasAsleep); }   // the picture first, then the light
   frames++;
 }
 
@@ -398,12 +400,13 @@ static void showPhoto(uint8_t *data, size_t len, int scale) {
   }
   photoOx = max(0, (TFT_W - w * photoScale) / 2);
   photoOy = max(0, (TFT_H - h * photoScale) / 2);
-  if (asleep) { asleep = false; backlight(); }        // something to show: wake up
+  bool wasAsleep = asleep;
   idleSince = 0; peekUntil = 0;
   if (!photoShown || idleShown) { gfx->fillScreen(BLACK); idleShown = false; }
   jpeg.decode(0, 0, opt);
   jpeg.close();
   Cache_WriteBack_Addr((uint32_t)fb, TFT_W * TFT_H * 2);
+  wakeAfterDraw(wasAsleep);                          // the photo first, then the light
   photoShown = true;
   lastFrameAt = millis();
   frames++;
@@ -559,13 +562,32 @@ static void updateProgress() {
   if (fill < bw) gfx->fillRect(bx + fill, by, bw - fill, bh, BLACK);
 }
 static uint32_t upBarAt = 0;
-static void updateAnimate() {           // called while the update is written: keep the rain going
-  mrStep();
-  if (millis() - upBarAt >= 200) { upBarAt = millis(); updateProgress(); }
+// A still rain picture for the firmware update screen (an animation stutters while flash is written).
+static void mrStill() {
+  for (int c = 0; c < MR_COLS; c++) {
+    int head = esp_random() % (MR_ROWS + 10), len = mrLen[c];
+    for (int d = 0; d < len; d++) mrCell(c, head - d, mrColor(d, len), true);
+  }
+}
+static void updateAnimate() {           // called while the update is written: only the bar moves
+  if (millis() - upBarAt >= 250) { upBarAt = millis(); updateProgress(); }
 }
 
 // The idle screen: the rain, with the name and what's happening in the panel. Called often; only redraws
 // the panel when its text changes (and everything when coming from LED pixels or a photo).
+// Nothing to show: dark (backlight off, black picture behind it, so waking never flashes old content).
+static void goDark() {
+  gfx->fillScreen(BLACK);
+  idleShown = false; photoShown = false; forceRedraw = true;
+  idleSince = 0; peekUntil = 0;
+  asleep = true;
+  backlight();
+}
+// Draw first, light up after: a wake-up shows the new picture straight away.
+static void wakeAfterDraw(bool wasAsleep) {
+  if (wasAsleep) { asleep = false; backlight(); }
+}
+
 static void showIdle() {
   if (!idleShown) { gfx->fillScreen(BLACK); mrInit(); idleShown = true; }
   String l2, l3;
@@ -612,7 +634,8 @@ static void hideOverlay() {
   forceRedraw = true;
   if (photoShown && live()) { gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK); }   // the next photo fills it
   else if (live()) render(bufs[drawIdx]);
-  else showIdle();
+  else if (idleShown) { /* boot / setup screen: the rain carries on */ }
+  else goDark();
 }
 
 // ---------- touch (GT911) ----------
@@ -754,7 +777,7 @@ static void handleSettings() {
   backlight();
   web.sendHeader("Location", "/");
   web.send(303);
-  if (sizeChanged && !customSize) { setLook(S.w, S.h, false, false); showIdle(); }
+  if (sizeChanged && !customSize) setLook(S.w, S.h, false, false);
   if (wifiChanged) { delay(300); ESP.restart(); }
 }
 
@@ -766,8 +789,7 @@ static void handleUpdateDone() {
   mrPanel("UPDATE FAILED", RED, "", 0, "");
   delay(2500);
   updating = false;
-  forceRedraw = true; photoShown = false; idleShown = false;
-  showIdle();
+  goDark();
 }
 static void handleUpdateUpload() {
   HTTPUpload &u = web.upload();
@@ -780,8 +802,11 @@ static void handleUpdateUpload() {
     gfx->fillScreen(BLACK);
     mrInit();
     idleShown = false;
+    asleep = false;
     mrPanel("FIRMWARE UPDATE", rgb565(60, 255, 90), "", 0, "Don't unplug");
+    mrStill();
     updateProgress();
+    backlight();
     Update.begin(UPDATE_SIZE_UNKNOWN);
   } else if (u.status == UPLOAD_FILE_WRITE) {
     Update.write(u.buf, u.currentSize);
@@ -809,7 +834,7 @@ static void handleState() {
       if (in["bri"].is<int>()) bri = constrain(in["bri"].as<int>(), 0, 255);
       backlight();
       if (!on) { gfx->fillScreen(BLACK); idleShown = false; forceRedraw = true; }
-      else if (!live()) showIdle();
+      else if (!live() && !idleShown) goDark();
     }
   }
   JsonDocument d;
@@ -868,7 +893,7 @@ static void setupWeb() {
     bool px = String(in["look"] | "dots") == "pixels";
     if (px) setLook(in["w"] | 120, in["h"] | 120, String(in["shape"] | "squares") == "squares", true);
     else setLook(S.w, S.h, false, false);
-    if (!live()) showIdle();
+    if (!live() && !idleShown) goDark();
     web.send(200, "application/json", "{\"ok\":true}");
   });
   web.on("/api/photo", HTTP_POST, [] {
@@ -976,13 +1001,13 @@ void loop() {
   // Wi-Fi: keep trying; open the setup hotspot after 30 s without a connection
   if (WiFi.status() == WL_CONNECTED) {
     wifiLostAt = 0;
-    if (apOn && WiFi.softAPgetStationNum() == 0) { stopAp(); if (!live()) showIdle(); }
+    if (apOn && WiFi.softAPgetStationNum() == 0) { stopAp(); if (!live()) goDark(); }
   } else if (S.ssid.length()) {
     if (!wifiLostAt) { wifiLostAt = now; WiFi.reconnect(); }
-    else if (now - wifiLostAt > 30000 && !apOn) { startAp(); if (!live()) showIdle(); }
+    else if (now - wifiLostAt > 30000 && !apOn) { startAp(); if (!live()) { bool w = asleep; showIdle(); wakeAfterDraw(w); } }
   }
 
-  if (on && !live() && lastFrameAt && !idleShown && !overlayUntil) showIdle();   // stream stopped
+  if (on && !live() && lastFrameAt && !idleShown && !asleep && !overlayUntil) goDark();   // stream stopped: dark
   if (idleShown && on && !overlayUntil && !asleep) {          // the rain keeps falling; panel follows Wi-Fi
     mrStep();
     static uint32_t panelAt = 0;
@@ -990,12 +1015,7 @@ void loop() {
     // nothing to show for a while (and not setting up): go to sleep until pixels, a photo or a tap
     bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
     if (!idleSince) idleSince = now;
-    if (!settingUp && now - idleSince > IDLE_SLEEP_MS && (!peekUntil || now > peekUntil)) {
-      asleep = true; peekUntil = 0;
-      gfx->fillScreen(BLACK);
-      idleShown = false;
-      backlight();
-    }
+    if (!settingUp && now - idleSince > IDLE_SLEEP_MS) goDark();   // after power-on: dark until there's something
   }
 
   static uint32_t touchAt = 0;
@@ -1005,9 +1025,8 @@ void loop() {
     static uint32_t upAt = 0;
     int t = touched();
     if (t == 1 && !wasDown && now - upAt > 250) {
-      if (asleep || (idleShown && !live())) {               // sleeping / idle: show the details for a while
-        asleep = false; peekUntil = now + 12000; idleSince = now;
-        idleShown = false; showIdle(); backlight();
+      if (asleep) {                                        // dark: the info strip (song, IP) on black
+        gfx->fillScreen(BLACK); asleep = false; backlight(); showOverlay();
       } else {
         if (on) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
         if (overlayUntil) hideOverlay(); else if (on) showOverlay();
