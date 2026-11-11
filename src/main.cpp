@@ -92,6 +92,10 @@ static uint8_t *mask;                // cell*cell: 1 = inside the round dot
 static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts and how wide it is
 static bool forceRedraw = true;
 static bool idleShown = false;     // the idle screen (Matrix rain) is showing
+static bool asleep = false;        // nothing to show: backlight off until pixels/photos arrive or a tap
+static uint32_t idleSince = 0, peekUntil = 0;
+static const uint32_t IDLE_SLEEP_MS = 15000;
+static String npTitle, npArtist;        // the song (from Signinator), shown on a tap
 static void mrStep();
 static int overlayTop = TFT_H;       // rows from here down belong to the overlay while it shows
 
@@ -194,7 +198,7 @@ static void backlight() {
   int v = 0;
   if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
-  digitalWrite(TFT_BCKL, (on && blDuty > 0) ? HIGH : LOW);
+  digitalWrite(TFT_BCKL, (on && blDuty > 0 && !asleep) ? HIGH : LOW);
   if (blDuty != dimFor) {
     for (int i = 0; i < 256; i++) dimLut[i] = (uint8_t)((i * blDuty + 127) / 255);
     dimFor = blDuty;
@@ -311,6 +315,8 @@ static void drawNewFrame() {
   if (readyIdx >= 0) { drawIdx = readyIdx; readyIdx = -1; idx = drawIdx; }
   xSemaphoreGive(bufLock);
   if (idx < 0) return;
+  if (asleep) { asleep = false; backlight(); }        // something to show: wake up
+  idleSince = 0; peekUntil = 0;
   if (idleShown || photoShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; photoShown = false; }
   lastFrameAt = millis();
   liveFrom = IPAddress(rxFrom);
@@ -392,6 +398,8 @@ static void showPhoto(uint8_t *data, size_t len, int scale) {
   }
   photoOx = max(0, (TFT_W - w * photoScale) / 2);
   photoOy = max(0, (TFT_H - h * photoScale) / 2);
+  if (asleep) { asleep = false; backlight(); }        // something to show: wake up
+  idleSince = 0; peekUntil = 0;
   if (!photoShown || idleShown) { gfx->fillScreen(BLACK); idleShown = false; }
   jpeg.decode(0, 0, opt);
   jpeg.close();
@@ -562,25 +570,23 @@ static void showIdle() {
   if (!idleShown) { gfx->fillScreen(BLACK); mrInit(); idleShown = true; }
   String l2, l3;
   uint16_t c2 = rgb565(60, 255, 90);
-  if (WiFi.status() == WL_CONNECTED) {
-    l2 = WiFi.localIP().toString();
-    l3 = "waiting for pixels on port 4048 - v" + String(VERSION);
-  } else if (apOn) {
+  bool peek = peekUntil && millis() < peekUntil;
+  if (apOn && WiFi.status() != WL_CONNECTED) {            // setting up: the instructions are needed
     l2 = "Join Wi-Fi " + apName;
     c2 = rgb565(255, 220, 80);
     l3 = "then open http://192.168.4.1";
-  } else {
-    l2 = "Connecting to Wi-Fi...";
-    l3 = String("v") + VERSION;
+  } else if (peek) {                                       // a tap: the details
+    l2 = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("No Wi-Fi yet");
+    l3 = npTitle.length() ? (npTitle + (npArtist.length() ? " - " + npArtist : "")).substring(0, 60)
+                          : String("Matrixinator v") + VERSION;
   }
   String key = l2 + "|" + l3;
   if (key == panelKey) return;
   panelKey = key;
-  mrPanel(S.name.length() <= 16 ? S.name : String("MATRIXINATOR"), rgb565(60, 255, 90), l2, c2, l3);
+  mrPanel("MATRIXINATOR", rgb565(60, 255, 90), l2, c2, l3);
 }
 
 // ---------- overlay (tap the screen) ----------
-static String npTitle, npArtist;
 static uint32_t overlayUntil = 0;
 static const int OVERLAY_H = 110;
 
@@ -977,10 +983,19 @@ void loop() {
   }
 
   if (on && !live() && lastFrameAt && !idleShown && !overlayUntil) showIdle();   // stream stopped
-  if (idleShown && on && !overlayUntil) {                     // the rain keeps falling; panel follows Wi-Fi
+  if (idleShown && on && !overlayUntil && !asleep) {          // the rain keeps falling; panel follows Wi-Fi
     mrStep();
     static uint32_t panelAt = 0;
     if (now - panelAt > 1000) { panelAt = now; showIdle(); }
+    // nothing to show for a while (and not setting up): go to sleep until pixels, a photo or a tap
+    bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
+    if (!idleSince) idleSince = now;
+    if (!settingUp && now - idleSince > IDLE_SLEEP_MS && (!peekUntil || now > peekUntil)) {
+      asleep = true; peekUntil = 0;
+      gfx->fillScreen(BLACK);
+      idleShown = false;
+      backlight();
+    }
   }
 
   static uint32_t touchAt = 0;
@@ -990,8 +1005,13 @@ void loop() {
     static uint32_t upAt = 0;
     int t = touched();
     if (t == 1 && !wasDown && now - upAt > 250) {
-      if (on) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
-      if (overlayUntil) hideOverlay(); else if (on) showOverlay();
+      if (asleep || (idleShown && !live())) {               // sleeping / idle: show the details for a while
+        asleep = false; peekUntil = now + 12000; idleSince = now;
+        idleShown = false; showIdle(); backlight();
+      } else {
+        if (on) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
+        if (overlayUntil) hideOverlay(); else if (on) showOverlay();
+      }
     }
     if (t == 0 && wasDown) upAt = now;
     if (t >= 0) wasDown = t == 1;
@@ -1001,7 +1021,7 @@ void loop() {
   // The backlight driver sometimes shuts itself off (the picture keeps changing in the dark) and stays off
   // until its enable pin is switched off and on. Re-arm it every 30 s with a 0.2 ms blip (too short to see).
   static uint32_t rearmAt = 0;
-  if (on && blDuty > 0 && now - rearmAt >= 30000) {
+  if (on && blDuty > 0 && !asleep && now - rearmAt >= 30000) {
     rearmAt = now;
     digitalWrite(TFT_BCKL, LOW);
     delayMicroseconds(200);
