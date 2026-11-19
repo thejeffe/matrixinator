@@ -22,10 +22,11 @@ and pixels arrive as **DDP on UDP 4048**. Each LED is drawn as a round dot; the 
 - **Clock only**: the clock during its hours, pictures ignored.
 
 Faces: **Gatsby** (black and gold sunburst), **Skyline** (steel, a crown of stepped triangles), **Ivory** (cream,
-black chapter ring, jade), **Midnight** (navy and silver, quiet at night), **Pup** (a cartoon puppy, bone hands,
-its nose is the hub), **Grandfather** (silvered chapter ring with Roman numerals, brass corners with scrollwork),
-**Christmas** (candy-cane hands, ornaments, days to Christmas), **Advent** (24 doors that open through December,
-the time as digits) and **Lit Up** (a ring of big Christmas bulbs that chase every second, days to Christmas).
+black chapter ring, jade), **Midnight** (navy and silver, quiet at night), **Grandfather** (silvered chapter ring
+with Roman numerals, brass corners with scrollwork), **Christmas** (candy-cane hands, ornaments, days to
+Christmas), **Advent** (24 doors that open through December, the time as digits), and four digital ones with the
+date, weather and moon: **Red LED** (old-school alarm clock), **VFD** (blue-green vacuum fluorescent), **Nixie**
+(glowing tubes) and **Flip** (flip-clock cards).
 Options: second hand, moon phase, clock brightness, time zone (time comes from NTP), and **at night**: screen off
 (a tap shows the clock for 30 s) or the clock dimmed to its own brightness.
 

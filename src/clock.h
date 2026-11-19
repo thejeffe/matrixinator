@@ -10,9 +10,11 @@
 namespace clk {
 
 static const int W = 480, H = 480;
-static const int FACE_COUNT = 9;
+static const int FACE_COUNT = 11;
 
-const char *faceName(int face);          // Gatsby, Skyline, Ivory, Midnight, Pup, Grandfather, Christmas, Advent, Lit Up
+const char *faceName(int face);          // Gatsby, Skyline, Ivory, Midnight, Grandfather, Christmas, Advent,
+                                         // Red LED, VFD, Nixie, Flip
+bool faceHasSeconds(int face);           // false: the face never shows seconds (Advent)
 
 struct Dial {
   int face = 0;
@@ -24,7 +26,7 @@ struct Dial {
   char pres[16] = "";                    // e.g. "983 HPA", "29.03 INHG", or "" = no pressure window
   char presWord[12] = "";                // barometer word: "STORMY", "RAIN", "CHANGE", "FAIR", "VERY DRY"
   int presTrend = 0;                     // 1 rising, -1 falling, 0 steady (an arrow after the number)
-  int month = 0, mday = 0;               // today (1-12, 1-31): the Advent calendar opens its doors by it
+  int month = 0, mday = 0, wday = 0;     // today (1-12, 1-31, 0 = Sunday): Advent opens doors by it, digital shows it
   int daysToXmas = -1;                   // 0 on Christmas Day; the Christmas and Advent faces count down
 };
 

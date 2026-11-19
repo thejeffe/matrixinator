@@ -12,6 +12,8 @@
 namespace clk {
 
 static const float CX = W / 2.0f, CY = H / 2.0f;
+// The faces, in the order the settings page lists them.
+enum { F_GATSBY, F_SKYLINE, F_IVORY, F_MIDNIGHT, F_GRANDFATHER, F_CHRISTMAS, F_ADVENT, F_LED, F_VFD, F_NIXIE, F_FLIP };
 static void (*yieldFn)() = nullptr;
 void setYield(void (*fn)()) { yieldFn = fn; }
 static const float PI2 = 6.28318531f;
@@ -359,9 +361,6 @@ static const Theme THEMES[FACE_COUNT] = {
     // Midnight: navy and silver, quiet for the night
     {{196, 204, 224}, {120, 134, 170}, {6, 10, 24}, {120, 134, 170}, {226, 228, 236}, {26, 32, 52},
      {200, 208, 226}, {8, 12, 30}, {214, 180, 96}, {200, 208, 226}, {10, 16, 40}},
-    // Pup: sky blue, a puppy in the middle, bone hands
-    {{30, 50, 100}, {70, 100, 160}, {252, 250, 244}, {30, 50, 100}, {250, 240, 200}, {70, 90, 130},
-     {252, 248, 236}, {112, 72, 40}, {220, 50, 50}, {20, 20, 20}, {255, 255, 255}},
     // Grandfather: silvered chapter ring on a brass plate, black hands
     {{30, 26, 22}, {96, 76, 44}, {238, 234, 222}, {40, 34, 28}, {245, 236, 205}, {40, 48, 80},
      {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {200, 160, 80}},
@@ -371,9 +370,11 @@ static const Theme THEMES[FACE_COUNT] = {
     // Advent: red, 24 doors, the time as digits
     {{244, 214, 120}, {250, 236, 210}, {60, 10, 14}, {222, 182, 92}, {250, 245, 220}, {40, 20, 20},
      {244, 214, 120}, {60, 10, 14}, {244, 214, 120}, {244, 214, 120}, {60, 10, 14}},
-    // Lit Up: a winter night ringed with big coloured bulbs that chase every second
-    {{250, 250, 250}, {200, 212, 240}, {8, 12, 30}, {230, 190, 90}, {250, 245, 220}, {20, 24, 50},
-     {250, 250, 250}, {16, 80, 36}, {250, 200, 60}, {204, 30, 40}, {250, 200, 60}},
+    // Red LED, VFD, Nixie, Flip: digital (only the moon colours are used)
+    {{230, 46, 34}, {140, 26, 20}, {0, 0, 0}, {0, 0, 0}, {255, 120, 90}, {40, 8, 6}, {}, {}, {}, {}, {}},
+    {{116, 236, 214}, {60, 140, 130}, {0, 0, 0}, {0, 0, 0}, {160, 255, 236}, {10, 34, 32}, {}, {}, {}, {}, {}},
+    {{255, 164, 96}, {170, 110, 70}, {0, 0, 0}, {0, 0, 0}, {255, 190, 120}, {50, 32, 24}, {}, {}, {}, {}, {}},
+    {{206, 206, 200}, {130, 130, 130}, {0, 0, 0}, {0, 0, 0}, {236, 232, 216}, {50, 50, 54}, {}, {}, {}, {}, {}},
 };
 
 static const C3 GOLD = {212, 172, 84}, SILVER = {196, 202, 214}, BRASS = {196, 156, 72};
@@ -464,15 +465,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
-        case 4: {  // Pup: sky blue, white ring, red bezel
-          float t = r / 220;
-          c = mix({184, 222, 244}, {120, 182, 228}, t * t);
-          c = mix(c, {250, 250, 250}, band(r, 218, 226));
-          if (r > 225 && r < 239) c = mix(c, metal({214, 56, 56}, r, 226, 238, a), band(r, 226, 238));
-          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
-          break;
-        }
-        case 5: {  // Grandfather: ring-turned centre, silvered chapter ring, brass plate in the corners
+        case F_GRANDFATHER: {  // Grandfather: ring-turned centre, silvered chapter ring, brass plate in the corners
           C3 ring = {236, 234, 226};
           c = r < 151 ? mix(mul({214, 208, 192}, 0.95f + 0.05f * fastSin(r * 0.95f)), ring, clamp01(r - 150 + 0.5f)) : ring;
           C3 ink = {30, 26, 22};
@@ -491,7 +484,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, mul({178, 138, 60}, 0.45f), clamp01(4.5f - edge));
           break;
         }
-        case 6: {  // Christmas: deep green, a candy-stripe bezel
+        case F_CHRISTMAS: {  // Christmas: deep green, a candy-stripe bezel
           float t = r / 220;
           c = mix({24, 96, 54}, {8, 48, 28}, t * t);
           c = mix(c, {222, 182, 92}, band(r, 218, 222));
@@ -507,7 +500,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
-        case 7: {  // Advent: red with a gold frame
+        case F_ADVENT: {  // Advent: red with a gold frame
           float ex = fabsf(dx) / 240, ey = fabsf(dy) / 240;
           c = mul({156, 22, 32}, 1.0f - 0.3f * (ex * ex + ey * ey));
           float edge = fminf(fminf(x + 0.5f, W - x - 0.5f), fminf(y + 0.5f, H - y - 0.5f));
@@ -515,12 +508,21 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {222, 182, 92}, band(edge, 10, 11));
           break;
         }
-        case 8: {  // Lit Up: night sky, a white rim, the light string's wire
-          float t = r / 220;
-          c = mix({18, 28, 66}, {4, 8, 24}, t * t);
-          c = mix(c, {236, 240, 250}, band(r, 206, 209));
-          c = mix(c, {6, 8, 16}, clamp01(r - 209 + 0.5f));
-          c = mix(c, {24, 70, 36}, band(r, 214.5f, 217.5f));
+        case F_LED:
+        case F_VFD: {  // black plastic
+          float t = (y + 0.5f) / H;
+          c = mix({26, 24, 24}, {6, 6, 6}, t);
+          break;
+        }
+        case F_NIXIE: {  // walnut
+          float grain = 0.82f + 0.12f * fastSin((y + 0.5f) * 0.09f + fastSin(x * 0.012f) * 3) + 0.06f * fastSin(y * 0.6f);
+          float vig = 1 - 0.35f * (dx * dx + dy * dy) / (240.0f * 240 * 2);
+          c = mul({92, 52, 28}, grain * vig);
+          break;
+        }
+        case F_FLIP: {
+          float t = r / 340;
+          c = mix({40, 40, 44}, {14, 14, 16}, t);
           break;
         }
         default: {  // Midnight: navy, a fan of fine lines
@@ -545,51 +547,6 @@ static void background(uint16_t *buf, int face) {
 
 // Many small shapes: each is filled over its own small area (one shape spanning the dial would be tested at every
 // pixel of the dial against every stroke).
-
-// The puppy in the middle of the Pup face: its nose is the centre of the hands.
-static void pup(uint16_t *buf) {
-  const float k = 0.78f;
-  auto X = [&](float v) { return CX + v * k; };
-  auto Y = [&](float v) { return CY + v * k; };
-  Shape ears, head, spot, muzzle, tongue, mouth, eyeW, eyeB, eyeH, brows;
-  ears.seg(X(-46), Y(-50), X(-66), Y(8), 17 * k);
-  ears.seg(X(46), Y(-50), X(66), Y(8), 17 * k);
-  head.disc(X(0), Y(-16), 56 * k);
-  spot.disc(X(24), Y(-40), 18 * k);
-  muzzle.disc(X(-14), Y(8), 21 * k);
-  muzzle.disc(X(14), Y(8), 21 * k);
-  tongue.disc(X(0), Y(30), 10 * k);
-  mouth.seg(X(0), Y(6), X(0), Y(17), 1.8f);
-  mouth.seg(X(0), Y(17), X(-9), Y(21), 1.8f);
-  mouth.seg(X(-9), Y(21), X(-16), Y(17), 1.8f);
-  mouth.seg(X(0), Y(17), X(9), Y(21), 1.8f);
-  mouth.seg(X(9), Y(21), X(16), Y(17), 1.8f);
-  eyeW.disc(X(-21), Y(-30), 11 * k);
-  eyeW.disc(X(21), Y(-30), 11 * k);
-  eyeB.disc(X(-20), Y(-28), 7 * k);
-  eyeB.disc(X(22), Y(-28), 7 * k);
-  eyeH.disc(X(-22.5f), Y(-31), 2.4f * k);
-  eyeH.disc(X(19.5f), Y(-31), 2.4f * k);
-  brows.seg(X(-30), Y(-48), X(-14), Y(-51), 2.2f);
-  brows.seg(X(14), Y(-51), X(30), Y(-48), 2.2f);
-  C3 tan = {204, 150, 92}, brown = {112, 72, 40}, outline = {70, 44, 24};
-  fill(buf, ears, {0, 0, 0}, 0.3f, 0, 6, 3, 4);
-  fill(buf, head, {0, 0, 0}, 0.3f, 0, 6, 3, 4);
-  fill(buf, ears, outline, 1, 1.5f);
-  fill(buf, ears, brown);
-  fill(buf, head, outline, 1, 1.5f);
-  fill(buf, head, tan);
-  fill(buf, spot, brown);
-  fill(buf, tongue, outline, 1, 1.2f);
-  fill(buf, tongue, {236, 104, 124});
-  fill(buf, muzzle, {248, 234, 208});
-  fill(buf, mouth, outline);
-  fill(buf, eyeW, outline, 1, 1.2f);
-  fill(buf, eyeW, {255, 255, 255});
-  fill(buf, eyeB, {20, 20, 20});
-  fill(buf, eyeH, {255, 255, 255});
-  fill(buf, brows, outline);
-}
 
 // Brass scrollwork in one corner of the Grandfather face (right / bottom mirror the top-left one).
 static void spandrel(uint16_t *buf, bool right, bool bottom) {
@@ -847,32 +804,7 @@ static void markers(uint16_t *buf, int face, bool moon) {
       fillAll(buf, nums, {20, 20, 20});
       break;
     }
-    case 4: {  // Pup: chunky 12 3 6 9, paw prints at the other hours, the puppy in the middle
-      for (int m = 0; m < 60; m++)
-        if (m % 5) add(ticks).disc(px(m * M60, 211), py(m * M60, 211), 1.6f);
-      for (int h = 0; h < 12; h++) {
-        if (h % 3 == 0) continue;
-        HandBuilder p(h * H12);
-        p.disc(184, 7.5f);                                       // the pad, toes further out
-        p.sh.disc(p.X(196, -9), p.Y(196, -9), 3.4f);
-        p.sh.disc(p.X(200, -3.2f), p.Y(200, -3.2f), 3.4f);
-        p.sh.disc(p.X(200, 3.2f), p.Y(200, 3.2f), 3.4f);
-        p.sh.disc(p.X(196, 9), p.Y(196, 9), 3.4f);
-        bars.push_back(p.sh);
-      }
-      const char *q[4] = {"12", "3", "6", "9"};
-      for (int i = 0; i < 4; i++) {
-        float a = i * 3 * H12;
-        text(add(nums), q[i], px(a, 178), py(a, 178), 40, 7, 2.2f);
-      }
-      fillAll(buf, ticks, {255, 255, 255});
-      fillAll(buf, bars, {112, 72, 40});
-      fillAll(buf, nums, {255, 255, 255}, 1, 2.5f);
-      fillAll(buf, nums, {30, 50, 100});
-      pup(buf);
-      break;
-    }
-    case 5: {  // Grandfather: Roman numerals round the ring, minute track, brass corners with scrollwork
+    case F_GRANDFATHER: {  // Grandfather: Roman numerals round the ring, minute track, brass corners with scrollwork
       for (int m = 0; m < 60; m++) {
         float a = m * M60;
         if (m % 5) add(ticks).seg(px(a, 203), py(a, 203), px(a, 217), py(a, 217), 0.6f);
@@ -892,7 +824,7 @@ static void markers(uint16_t *buf, int face, bool moon) {
       for (int c = 0; c < 4; c++) spandrel(buf, c & 1, c >> 1);
       break;
     }
-    case 6: {  // Christmas: gold 12 3 6 9, ornaments at the other hours, snowflakes
+    case F_CHRISTMAS: {  // Christmas: gold 12 3 6 9, ornaments at the other hours, snowflakes
       static const float flakes[][3] = {{-150, -60, 16}, {140, -150, 12}, {-60, 160, 13}, {158, 70, 14},
                                         {-128, 120, 10}, {60, -176, 9},  {-170, 30, 8},  {110, 150, 9}};
       for (auto &f : flakes) {
@@ -932,40 +864,8 @@ static void markers(uint16_t *buf, int face, bool moon) {
       fillAll(buf, nums, {244, 214, 120});
       break;
     }
-    case 7:    // Advent: drawn by advent()
+    case F_ADVENT:    // Advent: drawn by advent()
       break;
-    case 8: {  // Lit Up: white numerals, mini bulbs at the hours, snowflakes (the big bulbs come with the hands)
-      static const float flakes[][3] = {{-150, -60, 14}, {140, -150, 11}, {-60, 160, 12}, {158, 70, 13},
-                                        {-128, 120, 9}, {60, -176, 8},  {-170, 30, 8},  {110, 150, 9}};
-      for (auto &f : flakes) {
-        Shape &s = add(ticks);
-        for (int k = 0; k < 3; k++) {
-          float a = k * PI2 / 6, dx = sinf(a) * f[2], dy = cosf(a) * f[2];
-          s.seg(CX + f[0] - dx, CY + f[1] - dy, CX + f[0] + dx, CY + f[1] + dy, 1.1f);
-        }
-      }
-      fillAll(buf, ticks, {255, 255, 255}, 0.25f);
-      static const C3 mini[4] = {{255, 70, 70}, {80, 230, 110}, {90, 150, 255}, {255, 210, 70}};
-      for (int h = 0; h < 12; h++) {
-        if (h % 3 == 0) continue;
-        float a = h * H12;
-        Shape glow, bulb;
-        glow.disc(px(a, 198), py(a, 198), 5);
-        HandBuilder b(a);
-        b.disc(196, 4.2f);
-        b.poly({196, -3.6f, 207, 0, 196, 3.6f});
-        fill(buf, glow, mini[h % 4], 0.55f, 4, 10);
-        fill(buf, b.sh, mini[h % 4]);
-      }
-      const char *q[4] = {"12", "3", "6", "9"};
-      for (int i = 0; i < 4; i++) {
-        float a = i * 3 * H12;
-        text(nums, q[i], px(a, 176), py(a, 176), 40, 6, 2.4f);
-      }
-      fillAll(buf, nums, {120, 170, 255}, 0.5f, 2, 8);
-      fillAll(buf, nums, {250, 250, 255});
-      break;
-    }
     case 3:
     default: {  // Midnight: Roman quarters, silver bars, minute dots
       for (int m = 0; m < 60; m++)
@@ -1041,12 +941,16 @@ static void pressureWindow(uint16_t *buf, const Theme &t, const Dial &d) {
   fillAll(buf, num, two ? t.label : t.ink);
 }
 
+static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float my, float R);
 static void moonWindow(uint16_t *buf, const Theme &t, float phase) {
   const float mx = CX, my = CY + 108, R = 25;
   Shape win;
   win.disc(mx, my, R + 5);
   fill(buf, win, t.windowEdge, 1, 1.5f);
   fill(buf, win, t.window);
+  moonDisc(buf, t, phase, mx, my, R);
+}
+static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float my, float R) {
   float k = cosf(phase * PI2);
   bool waxing = phase < 0.5f;
   static const float craters[][3] = {{-0.35f, -0.3f, 0.22f}, {0.3f, 0.25f, 0.16f}, {0.05f, -0.05f, 0.12f},
@@ -1071,15 +975,226 @@ static void moonWindow(uint16_t *buf, const Theme &t, float phase) {
     }
 }
 
+// ---------- digital faces: Red LED, VFD, Nixie, Flip ----------
+// Big HH:MM across the middle, the date above, the weather and the moon below. The still parts (panel, unlit
+// segments, tubes, cards) are the base; the lit digits are drawn every tick by drawHands.
+struct Digi { C3 on, glow, ghost, text, dim; };
+static const Digi DIGI[4] = {
+    {{255, 44, 28}, {255, 20, 10}, {44, 7, 6}, {230, 46, 34}, {140, 26, 20}},          // Red LED
+    {{130, 255, 232}, {60, 255, 210}, {14, 42, 40}, {116, 236, 214}, {60, 140, 130}},  // VFD
+    {{255, 150, 60}, {255, 90, 20}, {64, 42, 32}, {255, 164, 96}, {170, 110, 70}},     // Nixie
+    {{238, 238, 232}, {0, 0, 0}, {0, 0, 0}, {206, 206, 200}, {130, 130, 130}},         // Flip
+};
+static const Digi &digi(int f) { return DIGI[f - F_LED]; }
+static bool isDigital(int f) { return f >= F_LED && f <= F_FLIP; }
+
+// The 4 big digit boxes and the colon between them
+static const float DX[4] = {31, 133, 263, 365}, DY = 96, DW = 84, DH = 170;
+static const float SX[2] = {377, 415}, SY = 290, SW = 32, SH = 52;          // seconds (7-segment faces)
+
+// One 7-segment digit: lit segments to `on`, unlit to `off` (either may be null). digit < 0 = blank.
+static void seg7(Shapes *on, Shapes *off, int digit, float x, float y, float w, float h, float t) {
+  static const uint8_t bits[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
+  uint8_t lit = digit >= 0 && digit <= 9 ? bits[digit] : 0;
+  const float g = t * 0.12f + 1, slant = 0.1f;
+  auto P = [&](float u, float v, float *px_, float *py_) { *px_ = x + u + (h / 2 - v) * slant; *py_ = y + v; };
+  for (int sgm = 0; sgm < 7; sgm++) {
+    float u[6], v[6];
+    if (sgm == 0 || sgm == 3 || sgm == 6) {                 // a, d, g: across
+      float vc = sgm == 0 ? t / 2 : sgm == 3 ? h - t / 2 : h / 2, u0 = t / 2 + g, u1 = w - t / 2 - g;
+      float uu[6] = {u0, u0 + t / 2, u1 - t / 2, u1, u1 - t / 2, u0 + t / 2};
+      float vv[6] = {vc, vc - t / 2, vc - t / 2, vc, vc + t / 2, vc + t / 2};
+      memcpy(u, uu, sizeof u); memcpy(v, vv, sizeof v);
+    } else {                                               // b, c, e, f: up and down
+      bool right = sgm == 1 || sgm == 2, low = sgm == 2 || sgm == 4;
+      float uc = right ? w - t / 2 : t / 2;
+      float v0 = low ? h / 2 + g : t / 2 + g, v1 = low ? h - t / 2 - g : h / 2 - g;
+      float uu[6] = {uc, uc + t / 2, uc + t / 2, uc, uc - t / 2, uc - t / 2};
+      float vv[6] = {v0, v0 + t / 2, v1 - t / 2, v1, v1 - t / 2, v0 + t / 2};
+      memcpy(u, uu, sizeof u); memcpy(v, vv, sizeof v);
+    }
+    // segment order a b c d e f g = bits 0..6
+    static const int bitOf[7] = {0, 1, 2, 3, 4, 5, 6};
+    float px6[6], py6[6];
+    for (int i = 0; i < 6; i++) P(u[i], v[i], &px6[i], &py6[i]);
+    Shapes *dst = (lit >> bitOf[sgm]) & 1 ? on : off;
+    if (dst) add(*dst).poly(px6, py6, 6);
+  }
+}
+// segment index -> which of a..g it is: the loop above uses 0 a, 1 b, 2 c, 3 d, 4 e, 5 f, 6 g
+
+static void colonDots(Shapes &v, float cx, float y, float h, float r, float slant = 0.1f) {
+  add(v).disc(cx + (h * 0.18f) * slant, y + h * 0.32f, r);
+  add(v).disc(cx - (h * 0.18f) * slant, y + h * 0.68f, r);
+}
+
+static void glowFill(uint16_t *buf, const Shapes &v, const Digi &c, float soft) {
+  fillAll(buf, v, c.glow, 0.55f, 3, soft);
+  fillAll(buf, v, c.on);
+}
+
+static void digitalBase(uint16_t *buf, int f) {
+  const Digi &c = digi(f);
+  if (f == F_LED || f == F_VFD) {
+    Shape panel;
+    panel.box(CX, 214, 228, 136, 18);
+    fill(buf, panel, {0, 0, 0}, 0.5f, 2, 8, 0, 4);
+    fill(buf, panel, f == F_LED ? C3{24, 4, 4} : C3{4, 16, 18});
+    Shape shine;
+    shine.box(CX, 86, 214, 3, 3);
+    fill(buf, shine, {255, 255, 255}, 0.06f);
+    Shapes off;
+    for (int i = 0; i < 4; i++) seg7(nullptr, &off, -1, DX[i], DY, DW, DH, 17);
+    for (int i = 0; i < 2; i++) seg7(nullptr, &off, -1, SX[i], SY, SW, SH, 7);
+    colonDots(off, CX, DY, DH, 8);
+    fillAll(buf, off, c.ghost);
+    Shapes ap;
+    text(ap, "AM", 70, 300, 16, 2.8f, 1.8f);
+    text(ap, "PM", 70, 330, 16, 2.8f, 1.8f);
+    fillAll(buf, ap, c.ghost);
+  } else if (f == F_NIXIE) {
+    for (int i = 0; i < 4; i++) {
+      Shape tube, rim, hl;
+      tube.box(DX[i] + DW / 2, DY + DH / 2, DW / 2 + 8, DH / 2 + 18, 34);
+      hl.box(DX[i] + 16, DY + DH / 2, 3, DH / 2 - 10, 3);
+      fill(buf, tube, {0, 0, 0}, 0.5f, 2, 10, 3, 6);
+      fill(buf, tube, {90, 80, 70}, 1, 1.5f);
+      fill(buf, tube, {20, 15, 13});
+      Shapes g;
+      text(g, "8", DX[i] + DW / 2, DY + DH / 2, 150, 4.5f);
+      text(g, "0", DX[i] + DW / 2, DY + DH / 2, 150, 4.5f);
+      fillAll(buf, g, c.ghost);
+      fill(buf, hl, {255, 255, 255}, 0.07f);
+      Shape base;
+      base.box(DX[i] + DW / 2, DY + DH + 26, DW / 2 + 4, 8, 3);
+      fill(buf, base, {40, 36, 32});
+    }
+  } else {                                               // Flip: two cards
+    for (int k = 0; k < 2; k++) {
+      float x0 = k ? 246 : 28, x1 = k ? 452 : 234, y0 = 92, y1 = 308, ym = (y0 + y1) / 2;
+      Shape card, top;
+      card.box((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2, 16);
+      top.box((x0 + x1) / 2, (y0 + ym) / 2, (x1 - x0) / 2, (ym - y0) / 2, 16);
+      fill(buf, card, {0, 0, 0}, 0.6f, 2, 12, 0, 6);
+      fill(buf, card, {44, 44, 48});
+      fill(buf, top, {54, 54, 58});
+      (void)top;
+    }
+  }
+}
+
+// The time: lit digits (7-segment faces), glowing numerals in the tubes (Nixie), or white digits on the cards.
+static void digitalTime(uint16_t *buf, int f, int h24, int m, int sec, bool showSeconds) {
+  const Digi &c = digi(f);
+  int h12 = (h24 + 11) % 12 + 1;
+  if (f == F_LED || f == F_VFD) {
+    Shapes on;
+    seg7(&on, nullptr, h12 >= 10 ? 1 : -1, DX[0], DY, DW, DH, 17);
+    seg7(&on, nullptr, h12 % 10, DX[1], DY, DW, DH, 17);
+    seg7(&on, nullptr, m / 10, DX[2], DY, DW, DH, 17);
+    seg7(&on, nullptr, m % 10, DX[3], DY, DW, DH, 17);
+    if (!showSeconds || sec % 2 == 0) colonDots(on, CX, DY, DH, 8);       // the colon blinks with seconds
+    if (showSeconds) {
+      seg7(&on, nullptr, sec / 10, SX[0], SY, SW, SH, 7);
+      seg7(&on, nullptr, sec % 10, SX[1], SY, SW, SH, 7);
+    }
+    text(on, h24 < 12 ? "AM" : "PM", 70, h24 < 12 ? 300 : 330, 16, 2.8f, 1.8f);
+    glowFill(buf, on, c, f == F_VFD ? 12 : 10);
+  } else if (f == F_NIXIE) {
+    char d[4] = {(char)('0' + h12 / 10), (char)('0' + h12 % 10), (char)('0' + m / 10), (char)('0' + m % 10)};
+    for (int i = 0; i < 4; i++) {
+      if (i == 0 && h12 < 10) continue;
+      char s1[2] = {d[i], 0};
+      Shapes g;
+      text(g, s1, DX[i] + DW / 2, DY + DH / 2, 150, 7);
+      fillAll(buf, g, c.glow, 0.6f, 4, 18);
+      fillAll(buf, g, c.on);
+      fillAll(buf, g, {255, 226, 180}, 1, -2.2f);
+    }
+    Shapes dots;
+    if (!showSeconds || sec % 2 == 0) colonDots(dots, CX, DY, DH, 6, 0);
+    glowFill(buf, dots, c, 10);
+    Shapes ap;
+    char sx[12];
+    if (showSeconds) snprintf(sx, sizeof sx, "%s  %02d", h24 < 12 ? "AM" : "PM", sec);
+    else snprintf(sx, sizeof sx, "%s", h24 < 12 ? "AM" : "PM");
+    text(ap, sx, CX, 322, 18, 3, 2.0f);
+    glowFill(buf, ap, c, 8);
+  } else {                                               // Flip
+    char hs[4], ms[4];
+    snprintf(hs, sizeof hs, "%d", h12);
+    snprintf(ms, sizeof ms, "%02d", m);
+    Shapes dg;
+    text(dg, hs, 131, 200, 136, 19, 2.6f);
+    text(dg, ms, 349, 200, 136, 19, 2.6f);
+    fillAll(buf, dg, c.on);
+    for (int k = 0; k < 2; k++) {                          // the split across each card, over the digits
+      float x0 = k ? 246 : 28, x1 = k ? 452 : 234;
+      Shape line, n1, n2;
+      line.box((x0 + x1) / 2, 200, (x1 - x0) / 2, 2, 0);
+      n1.box(x0 + 3, 200, 4, 7, 2);
+      n2.box(x1 - 3, 200, 4, 7, 2);
+      fill(buf, line, {14, 14, 16});
+      fill(buf, n1, {14, 14, 16});
+      fill(buf, n2, {14, 14, 16});
+    }
+    Shapes small;
+    text(small, h24 < 12 ? "AM" : "PM", 56, 290, 13, 2.4f, 1.8f);
+    if (showSeconds) { char sx[4]; snprintf(sx, sizeof sx, "%02d", sec); text(small, sx, 424, 290, 13, 2.4f, 1.8f); }
+    fillAll(buf, small, c.dim);
+  }
+}
+
+static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float my, float R);
+
+// Date above, weather and moon below.
+static void digitalInfo(uint16_t *buf, int f, const Dial &d) {
+  const Digi &c = digi(f);
+  static const char *days[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+  static const char *mons[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+  char line[48];
+  Shapes top;
+  if (d.month >= 1 && d.month <= 12) {
+    snprintf(line, sizeof line, "%s  %s %d", days[d.wday % 7], mons[d.month - 1], d.mday);
+    text(top, line, CX, 46, 24, 3.4f, 2.2f);
+  }
+  Shapes info, info2;
+  if (d.temps) {
+    char a[24], b[24];
+    snprintf(a, sizeof a, "IN %s%s%s%s", d.in, strcmp(d.in, "--") ? "*" : "", d.inHum[0] ? "  " : "", d.inHum);
+    if (d.inHum[0] && strcmp(d.inHum, "--")) strcat(a, "%");
+    snprintf(b, sizeof b, "OUT %s%s%s%s", d.out, strcmp(d.out, "--") ? "*" : "", d.outHum[0] ? "  " : "", d.outHum);
+    if (d.outHum[0] && strcmp(d.outHum, "--")) strcat(b, "%");
+    text(info, a, 128, 384, 20, 3, 2.0f);
+    text(info, b, 352, 384, 20, 3, 2.0f);
+  }
+  if (d.pres[0]) {
+    snprintf(line, sizeof line, "%s%s%s%s", d.presWord, d.presWord[0] ? "  " : "", d.pres,
+             d.presTrend > 0 ? " {" : d.presTrend < 0 ? " }" : "");
+    text(info2, line, d.moon ? 214 : CX, 428, 16, 2.4f, 1.9f);
+  }
+  if (f == F_FLIP) {
+    fillAll(buf, top, c.text);
+    fillAll(buf, info, c.text);
+    fillAll(buf, info2, c.dim);
+  } else {
+    glowFill(buf, top, {c.text, c.glow, c.ghost, c.text, c.dim}, 8);
+    glowFill(buf, info, {c.text, c.glow, c.ghost, c.text, c.dim}, 8);
+    fillAll(buf, info2, c.dim);
+  }
+  if (d.moon) moonDisc(buf, THEMES[f], d.moonPhase, d.pres[0] ? 400 : CX, d.pres[0] ? 428 : 430, 16);
+}
+
 void baseKey(const Dial &d, char *out, int n) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
-  if (f == 7) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, d.daysToXmas);   // Advent: changes daily
+  if (f == F_ADVENT) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, d.daysToXmas);   // Advent: changes daily
   else snprintf(out, n, "%d|%d", f, f == 3 ? (int)d.moon : 0);                   // Midnight's VI moves for the moon
 }
 void renderBase(uint16_t *buf, const Dial &d) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
   background(buf, f);
-  if (f == 7) advent(buf, d);                   // the Advent calendar fills the screen: no windows
+  if (f == F_ADVENT) advent(buf, d);                   // the Advent calendar fills the screen: no windows
+  else if (isDigital(f)) digitalBase(buf, f);
   else markers(buf, f, d.moon);
 }
 void renderDial(uint16_t *buf, const Dial &d) {
@@ -1089,12 +1204,13 @@ void renderDial(uint16_t *buf, const Dial &d) {
 void renderExtras(uint16_t *buf, const Dial &d) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
   const Theme &t = THEMES[f];
-  if (f == 7) return;
+  if (f == F_ADVENT) return;
+  if (isDigital(f)) { digitalInfo(buf, f, d); return; }
   if (d.temps) {
     tempWindow(buf, t, CX - 96, CY, "IN", d.in, d.inHum);
     tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
   }
-  if ((f == 6 || f == 8) && d.daysToXmas >= 0) countdownWindow(buf, t, d.daysToXmas);   // in place of the pressure
+  if (f == F_CHRISTMAS && d.daysToXmas >= 0) countdownWindow(buf, t, d.daysToXmas);   // in place of the pressure
   else if (d.pres[0]) pressureWindow(buf, t, d);
   if (d.moon) moonWindow(buf, t, d.moonPhase);
 }
@@ -1118,29 +1234,17 @@ static void handShapes(int face, int which, float a, Shape &out) {   // which: 0
       else if (which == 1) { h.poly({-26, -4, 172, -2.5f, 172, 2.5f, -26, 4}); h.poly({166, 0, 182, -5.5f, 204, 0, 182, 5.5f}); h.disc(-26, 5); }
       else { h.line(-40, 196, 1.2f); h.disc(150, 4.5f); h.disc(-30, 6); }
       break;
-    case 4:  // Pup: bones
-      if (which == 0) { h.line(-8, 92, 6); h.sh.disc(h.X(92, -6), h.Y(92, -6), 7.5f); h.sh.disc(h.X(92, 6), h.Y(92, 6), 7.5f);
-                        h.sh.disc(h.X(-8, -6), h.Y(-8, -6), 7.5f); h.sh.disc(h.X(-8, 6), h.Y(-8, 6), 7.5f); }
-      else if (which == 1) { h.line(-10, 168, 4.5f); h.sh.disc(h.X(168, -5), h.Y(168, -5), 6); h.sh.disc(h.X(168, 5), h.Y(168, 5), 6);
-                             h.sh.disc(h.X(-10, -5), h.Y(-10, -5), 6); h.sh.disc(h.X(-10, 5), h.Y(-10, 5), 6); }
-      else { h.line(-30, 196, 1.3f); h.disc(176, 6); }                      // a red ball
-      break;
-    case 5:  // Grandfather: spade hour, a slim minute with a bead, fine seconds
+    case F_GRANDFATHER:  // Grandfather: spade hour, a slim minute with a bead, fine seconds
       if (which == 0) {
         h.rect(-22, 64, 6); h.disc(36, 7); h.disc(-22, 7);
         h.poly({58, 0, 76, -14, 98, 0, 76, 14}); h.disc(72, 8); h.poly({94, -4, 120, 0, 94, 4});
       } else if (which == 1) { h.rect(-28, 170, 4); h.disc(118, 5.5f); h.disc(-28, 6); h.poly({160, 0, 174, -6, 204, 0, 174, 6}); }
       else { h.line(-40, 190, 1.0f); h.disc(-30, 5); }
       break;
-    case 6:  // Christmas: candy canes (stripes added in drawHands)
+    case F_CHRISTMAS:  // Christmas: candy canes (stripes added in drawHands)
       if (which == 0) h.line(-16, 104, 6.5f);
       else if (which == 1) h.line(-20, 178, 5);
       else { h.line(-36, 196, 1.3f); h.disc(186, 5); }
-      break;
-    case 8:  // Lit Up: plain tapered hands with a round end
-      if (which == 0) { h.poly({-18, -6, 104, -3.5f, 104, 3.5f, -18, 6}); h.disc(106, 6); }
-      else if (which == 1) { h.poly({-22, -4.5f, 184, -2.5f, 184, 2.5f, -22, 4.5f}); h.disc(186, 4.5f); }
-      else { h.line(-36, 200, 1.2f); h.disc(-28, 5); }
       break;
     case 3:
     default:  // Midnight: slim dauphine
@@ -1161,7 +1265,7 @@ static void caneStripes(uint16_t *buf, float a, float t0, float t1, float w) {
   }
 }
 
-static void digitalTime(uint16_t *buf, float hour, float minute) {
+static void adventTime(uint16_t *buf, float hour, float minute) {
   int h = (int)hour % 24, m = (int)minute % 60;
   char t[12];
   snprintf(t, sizeof t, "%d:%02d", (h + 11) % 12 + 1, m);
@@ -1175,65 +1279,27 @@ static void digitalTime(uint16_t *buf, float hour, float minute) {
   fillAll(buf, b, {244, 214, 120});
 }
 
-// The big bulbs round the Lit Up face: three in four lit, the pattern stepping along every second.
-static void bulbs(uint16_t *buf, int step) {
-  static const C3 cols[5] = {{255, 50, 50}, {40, 220, 90}, {70, 130, 255}, {255, 200, 40}, {255, 130, 30}};
-  const int N = 32;
-  for (int i = 0; i < N; i++) {
-    float a = (i + 0.5f) * PI2 / N;
-    bool lit = (i + step) % 4 != 0;
-    C3 c = cols[i % 5];
-    HandBuilder b(a);
-    b.disc(226, 8);
-    b.poly({223, -7.6f, 241, 0, 223, 7.6f});
-    Shape sock;
-    HandBuilder k(a);
-    k.rect(213, 220, 9);
-    sock = k.sh;
-    if (lit) {
-      Shape glow;
-      glow.disc(px(a, 226), py(a, 226), 9);
-      fill(buf, glow, c, 0.75f, 8, 18);
-    }
-    fill(buf, sock, {30, 90, 44});
-    fill(buf, b.sh, lit ? c : mul(c, 0.3f));
-    if (lit) {
-      Shape shine;
-      shine.disc(b.X(228, -3), b.Y(228, -3), 2.4f);
-      fill(buf, shine, {255, 255, 255}, 0.7f);
-    }
-  }
-}
-
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds) {
   int f = face < 0 || face >= FACE_COUNT ? 0 : face;
   const Theme &t = THEMES[f];
-  if (f == 7) { digitalTime(buf, hour, minute); return; }
-  if (f == 8) bulbs(buf, (int)second);   // the screen redraws this face every second
+  if (f == F_ADVENT) { adventTime(buf, hour, minute); return; }
+  if (isDigital(f)) { digitalTime(buf, f, (int)hour % 24, (int)minute % 60, (int)second % 60, showSeconds); return; }
   float ah = fmodf(hour, 12) / 12 * PI2, am = minute / 60 * PI2, as = second / 60 * PI2;
   Shape s;
   handShapes(f, 0, ah, s);
   fill(buf, s, {0, 0, 0}, 0.42f, 0, 7, 3, 5);
   fill(buf, s, t.handEdge, 1, 1.1f);
   fill(buf, s, t.hands);
-  if (f == 6) caneStripes(buf, ah, -10, 100, 13);
+  if (f == F_CHRISTMAS) caneStripes(buf, ah, -10, 100, 13);
   handShapes(f, 1, am, s);
   fill(buf, s, {0, 0, 0}, 0.42f, 0, 7, 4, 6);
   fill(buf, s, t.handEdge, 1, 1.1f);
   fill(buf, s, t.hands);
-  if (f == 6) caneStripes(buf, am, -14, 176, 10);
+  if (f == F_CHRISTMAS) caneStripes(buf, am, -14, 176, 10);
   if (showSeconds) {
     handShapes(f, 2, as, s);
     fill(buf, s, {0, 0, 0}, 0.35f, 0, 5, 4, 7);
     fill(buf, s, t.second);
-  }
-  if (f == 4) {                                 // Pup: the hub is the puppy's nose
-    Shape nose, shine;
-    nose.box(CX, CY, 12, 9, 7);
-    shine.disc(CX - 4, CY - 4, 2.6f);
-    fill(buf, nose, {20, 20, 20});
-    fill(buf, shine, {255, 255, 255}, 0.85f);
-    return;
   }
   Shape hub, dot;
   hub.disc(CX, CY, f == 3 ? 8 : 10);
@@ -1257,10 +1323,11 @@ const char *moonName(float p) {
 }
 
 void init() { glyph('0'); }
+bool faceHasSeconds(int f) { return f != F_ADVENT; }
 
 const char *faceName(int f) {
-  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline", "Ivory", "Midnight", "Pup",
-                                             "Grandfather", "Christmas", "Advent", "Lit Up"};
+  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline",   "Ivory", "Midnight", "Grandfather", "Christmas",
+                                      "Advent", "Red LED", "VFD",   "Nixie",    "Flip"};
   return f >= 0 && f < FACE_COUNT ? n[f] : n[0];
 }
 

@@ -799,6 +799,7 @@ static clk::Dial makeDial(time_t now, const tm &t, int face, String *key) {
   d.temps = S.ha;
   d.month = t.tm_mon + 1;
   d.mday = t.tm_mday;
+  d.wday = t.tm_wday;
   d.daysToXmas = daysToChristmas(t);
   if (S.ha) {
     xSemaphoreTake(haLock, portMAX_DELAY);
@@ -854,8 +855,7 @@ static void clockTick() {
   }
   if (dialFace < 0) return;                            // the first dial isn't ready yet
   const int face = dialFace;                                     // hands to match the dial on show
-  const bool lights = face == 8;                                 // Lit Up: the bulbs step every second
-  const bool secs = (S.secs || lights) && face != 7;             // Advent shows minutes only
+  const bool secs = S.secs && clk::faceHasSeconds(face);         // Advent shows minutes only
   int bri = clockBri();
   static int briShown = -1;
   if (bri != briShown) { briShown = bri; clockForce = true; }
@@ -866,7 +866,7 @@ static void clockTick() {
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
   float hh, mm;
   handTimes(t, hh, mm);
-  clk::drawHands(clkBuf, face, hh, mm, t.tm_sec, S.secs && face != 7);
+  clk::drawHands(clkBuf, face, hh, mm, t.tm_sec, secs);
   // to the screen at the clock's brightness, leaving the tap overlay alone
   static uint8_t d5[32], d6[64];
   static int dimAt = -1;
@@ -1500,7 +1500,7 @@ static void setupWeb() {
     clk::renderExtras(pv, d);
     float hh, mm;
     handTimes(t, hh, mm);
-    clk::drawHands(pv, face, hh, mm, t.tm_sec, S.secs && face != 7);
+    clk::drawHands(pv, face, hh, mm, t.tm_sec, S.secs && clk::faceHasSeconds(face));
     web.sendHeader("X-Render-Ms", String(millis() - t0));
     // half size: each output pixel is the average of 2x2
     const int PW = TFT_W / 2, PH = TFT_H / 2;
