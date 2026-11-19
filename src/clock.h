@@ -39,6 +39,7 @@ void baseKey(const Dial &d, char *out, int n);
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 
 void init();                             // build the font once, before drawing from two tasks at a time
+void setYield(void (*fn)());             // called now and then during long drawing (lets other tasks run)
 
 float moonPhase(time_t utc);             // 0..1
 const char *moonName(float phase);

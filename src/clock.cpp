@@ -12,6 +12,8 @@
 namespace clk {
 
 static const float CX = W / 2.0f, CY = H / 2.0f;
+static void (*yieldFn)() = nullptr;
+void setYield(void (*fn)()) { yieldFn = fn; }
 static const float PI2 = 6.28318531f;
 
 // ---------- colour ----------
@@ -112,6 +114,7 @@ struct Shape {
 static void fill(uint16_t *buf, const Shape &s, C3 c, float alpha = 1, float grow = 0, float soft = 1,
                  float ox = 0, float oy = 0) {
   if (s.x1 < s.x0) return;
+  if (yieldFn) yieldFn();
   float pad = grow + soft + 1.5f;
   int xa = (int)floorf(s.x0 + ox - pad), xb = (int)ceilf(s.x1 + ox + pad);
   int ya = (int)floorf(s.y0 + oy - pad), yb = (int)ceilf(s.y1 + oy + pad);
@@ -375,11 +378,19 @@ static const Theme THEMES[FACE_COUNT] = {
 
 static const C3 GOLD = {212, 172, 84}, SILVER = {196, 202, 214}, BRASS = {196, 156, 72};
 
+// sin to about 0.001, much quicker than the library's on the ESP32 (for textures, not geometry).
+static inline float fastSin(float x) {
+  const float inv = 1 / PI2;
+  x -= PI2 * floorf(x * inv + 0.5f);                  // -pi .. pi
+  float y = 1.27323954f * x - 0.40528473f * x * fabsf(x);
+  return 0.225f * (y * fabsf(y) - y) + y;
+}
+
 static inline float band(float r, float r0, float r1) { return clamp01(fminf(r - r0, r1 - r) + 0.5f); }
 // Polished metal ring: lighter towards the top left, a rounded profile across the ring.
 static C3 metal(C3 base, float r, float r0, float r1, float a) {
   float m = (r - r0) / (r1 - r0) * 2 - 1;                 // -1 .. 1 across
-  float light = 0.72f + 0.34f * cosf(a - 5.5f);           // 5.5 rad = towards 10 o'clock
+  float light = 0.72f + 0.34f * fastSin(a - 5.5f + 1.57079633f);   // cos; 5.5 rad = towards 10 o'clock
   float prof = 1.08f - 0.32f * m * m;
   return mul(base, light * prof);
 }
@@ -395,6 +406,7 @@ static float wedge(float a, float r, int n, float phase = 0) {
 
 static void background(uint16_t *buf, int face) {
   for (int y = 0; y < H; y++) {
+    if (yieldFn && (y & 15) == 0) yieldFn();
     for (int x = 0; x < W; x++) {
       float dx = x + 0.5f - CX, dy = y + 0.5f - CY;
       float r = sqrtf(dx * dx + dy * dy);
@@ -462,7 +474,7 @@ static void background(uint16_t *buf, int face) {
         }
         case 5: {  // Grandfather: ring-turned centre, silvered chapter ring, brass plate in the corners
           C3 ring = {236, 234, 226};
-          c = r < 151 ? mix(mul({214, 208, 192}, 0.95f + 0.05f * sinf(r * 0.95f)), ring, clamp01(r - 150 + 0.5f)) : ring;
+          c = r < 151 ? mix(mul({214, 208, 192}, 0.95f + 0.05f * fastSin(r * 0.95f)), ring, clamp01(r - 150 + 0.5f)) : ring;
           C3 ink = {30, 26, 22};
           c = mix(c, ink, band(r, 150, 151.5f));
           c = mix(c, ink, band(r, 155, 156));
@@ -470,7 +482,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, ink, band(r, 219, 220.5f));
           c = mix(c, mul({178, 138, 60}, 0.7f), band(r, 220.5f, 224));
           if (r > 223) {   // brushed brass
-            C3 plate = mul({178, 138, 60}, 0.93f + 0.05f * sinf((y + 0.5f) * 1.7f + sinf(x * 0.045f) * 2) +
+            C3 plate = mul({178, 138, 60}, 0.93f + 0.05f * fastSin((y + 0.5f) * 1.7f + fastSin(x * 0.045f) * 2) +
                                                0.04f * (1 - (dx + dy) / 680));
             c = mix(c, plate, clamp01(r - 224 + 0.5f));
           }

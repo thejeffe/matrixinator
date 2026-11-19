@@ -1579,6 +1579,10 @@ void setup() {
   dialBack = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   baseBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   clk::init();
+  clk::setYield([] {           // only the dial task gives way; drawing on the main loop (previews) runs straight
+    static uint32_t at = 0;
+    if (xTaskGetCurrentTaskHandle() == dialTaskH && millis() - at > 50) { at = millis(); vTaskDelay(1); }
+  });
   clkBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
@@ -1613,8 +1617,8 @@ void setup() {
   streamDrawn = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(photoTask, "photo", 6144, nullptr, 4, nullptr, 0);
   xTaskCreatePinnedToCore(haTask, "ha", 10240, nullptr, 1, nullptr, 0);
-  // priority 0: shares core 0 with the idle task, so a long drawing never trips the watchdog
-  xTaskCreatePinnedToCore(dialTask, "dial", 8192, nullptr, 0, &dialTaskH, 0);
+  // drawing pauses for a tick now and then (setYield below), so the idle task and the watchdog are happy
+  xTaskCreatePinnedToCore(dialTask, "dial", 8192, nullptr, 1, &dialTaskH, 0);
   applyTz();                          // internet time (keeps trying in the background)
   setupWeb();
   showIdle();
