@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
       strcpy(d.out, f == 3 ? "-4" : "48");
       d.month = 12; d.mday = 9; d.daysToXmas = 16;
       if (v == 1 && f == 7) { d.month = 11; d.mday = 18; d.daysToXmas = 37; }
-      if (v == 0) { strcpy(d.inHum, "55"); strcpy(d.outHum, "74"); strcpy(d.pres, f == 1 ? "29.03 INHG" : "983 HPA"); }
+      if (v == 0) { strcpy(d.inHum, "55"); strcpy(d.outHum, "74"); strcpy(d.pres, f == 1 ? "29.03 INHG" : "983 HPA"); strcpy(d.presWord, f == 1 ? "CHANGE" : "FAIR"); d.presTrend = f % 3 - 1; }
       auto t0 = std::chrono::steady_clock::now();
       clk::renderDial(dial.data(), d);
       auto t1 = std::chrono::steady_clock::now();

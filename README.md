@@ -34,7 +34,10 @@ entity ids: inside and outside temperature, inside and outside humidity, air pre
 The screen reads `GET /api/states/<entity>` every minute. Temperatures and humidity sit in IN / OUT windows
 either side of the centre; pressure (with HA's unit, e.g. 983 HPA or 29.03 INHG) in a window below 12.
 
-`GET /api/clock` gives the clock's status; `POST /api/clock?preview=30` shows it for 30 s; `POST /api/clock`
+`GET /api/clock.bmp?face=N` is a picture of face N as it would look now (the settings page shows it as a preview).
+The pressure window shows a barometer word (Stormy, Rain, Change, Fair, Very dry) from the sea-level pressure
+(the reading corrected with Home Assistant's elevation, unless it's switched off) and a rising / falling arrow
+for the last 3 hours. `GET /api/clock` gives the clock's status; `POST /api/clock?preview=30` shows it for 30 s; `POST /api/clock`
 with `{"face":1}` or `{"mode":1}` changes the face or mode.
 
 `tools/preview` draws every face to image files on a PC (the clock code is plain C++):

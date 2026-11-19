@@ -22,6 +22,8 @@ struct Dial {
   char in[8] = "--", out[8] = "--";      // e.g. "71", "-3" or "--"; a degree sign is added after numbers
   char inHum[8] = "", outHum[8] = "";    // e.g. "54" (a % sign is added), "--", or "" = not shown
   char pres[16] = "";                    // e.g. "983 HPA", "29.03 INHG", or "" = no pressure window
+  char presWord[12] = "";                // barometer word: "STORMY", "RAIN", "CHANGE", "FAIR", "VERY DRY"
+  int presTrend = 0;                     // 1 rising, -1 falling, 0 steady (an arrow after the number)
   int month = 0, mday = 0;               // today (1-12, 1-31): the Advent calendar opens its doors by it
   int daysToXmas = -1;                   // 0 on Christmas Day; the Christmas and Advent faces count down
 };

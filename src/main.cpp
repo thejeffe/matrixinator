@@ -53,7 +53,8 @@ struct Settings {
   // Home Assistant temperatures
   bool ha = false;
   String haUrl = "http://homeassistant.local:8123", haToken;
-  String haEnt[5];          // entity ids: inside temp, outside temp, inside humidity, outside humidity, pressure
+  String haEnt[5];
+  bool haSea = true;        // the pressure sensor reads station pressure: correct it with HA's elevation          // entity ids: inside temp, outside temp, inside humidity, outside humidity, pressure
 } S;
 static Preferences prefs;
 // Home Assistant readings, in this order everywhere
@@ -91,6 +92,7 @@ static void loadSettings() {
   S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
   S.haToken = prefs.getString("hatok", "");
   for (int i = 0; i < 5; i++) S.haEnt[i] = prefs.getString(HA_KEYS[i], "");
+  S.haSea = prefs.getBool("hasea", true);
   prefs.end();
 }
 static void saveSettings() {
@@ -119,6 +121,7 @@ static void saveSettings() {
   prefs.putString("haurl", S.haUrl);
   prefs.putString("hatok", S.haToken);
   for (int i = 0; i < 5; i++) prefs.putString(HA_KEYS[i], S.haEnt[i]);
+  prefs.putBool("hasea", S.haSea);
   prefs.end();
 }
 
@@ -714,6 +717,12 @@ static const uint32_t CLOCK_PEEK_MS = 30000;
 // Home Assistant (its own task, so a slow reply never holds up the screen)
 static SemaphoreHandle_t haLock;
 static String haTxt[HA_N], haErr;        // ready to show: "71", "54", "983 HPA"
+static String haPresWord;                // barometer word for the sea-level pressure
+static int haPresTrend = 0;              // over the last 3 hours: 1 rising, -1 falling
+static float haPresHpa = NAN, haPresSea = NAN, haElevM = NAN;
+static const char *barometerWord(float seaHpa) {     // the words on an old aneroid barometer
+  return seaHpa < 973 ? "STORMY" : seaHpa < 990 ? "RAIN" : seaHpa < 1007 ? "CHANGE" : seaHpa < 1024 ? "FAIR" : "VERY DRY";
+}
 static uint32_t haAt[HA_N] = {}, haTriedAt = 0;   // when each was last read (0 = never)
 static volatile bool haKick = true;
 static const uint32_t HA_EVERY_MS = 60000, HA_STALE_MS = 30 * 60000;
@@ -752,13 +761,11 @@ static int daysToChristmas(const tm &now) {
   return (int)lround(difftime(mktime(&b), mktime(&a)) / 86400.0);
 }
 
-static void clockTick() {
-  if (!dialBuf || !clkBuf) return;
-  time_t now = time(nullptr);
-  tm t;
-  localtime_r(&now, &t);
+// What's on the dial right now (for the screen, or the preview on the settings page). `key` changes whenever
+// the dial would look different.
+static clk::Dial makeDial(time_t now, const tm &t, int face, String *key) {
   clk::Dial d;
-  d.face = S.face;
+  d.face = face;
   d.moon = S.moon;
   int moonStep = (int)(clk::moonPhase(now) * 118);                 // the moon is redrawn about every 6 hours
   d.moonPhase = (moonStep + 0.5f) / 118;
@@ -778,11 +785,32 @@ static void clockTick() {
     strlcpy(d.inHum, v[HA_IN_H].c_str(), sizeof d.inHum);
     strlcpy(d.outHum, v[HA_OUT_H].c_str(), sizeof d.outHum);
     strlcpy(d.pres, v[HA_PRES].c_str(), sizeof d.pres);
+    if (v[HA_PRES].length() && v[HA_PRES] != "--") {
+      xSemaphoreTake(haLock, portMAX_DELAY);
+      strlcpy(d.presWord, haPresWord.c_str(), sizeof d.presWord);
+      d.presTrend = haPresTrend;
+      xSemaphoreGive(haLock);
+    }
     if (!d.inHum[0] && d.outHum[0]) strlcpy(d.inHum, "--", sizeof d.inHum);   // both windows the same height
     if (!d.outHum[0] && d.inHum[0]) strlcpy(d.outHum, "--", sizeof d.outHum);
   }
-  String key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out + "|" +
-               d.inHum + "|" + d.outHum + "|" + d.pres + "|" + d.month + "/" + d.mday;
+  if (key)
+    *key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out + "|" + d.inHum +
+           "|" + d.outHum + "|" + d.pres + "|" + d.presWord + d.presTrend + "|" + d.month + "/" + d.mday;
+  return d;
+}
+static void handTimes(const tm &t, float &h, float &m) {
+  h = t.tm_hour + t.tm_min / 60.0f + t.tm_sec / 3600.0f;
+  m = t.tm_min + t.tm_sec / 60.0f;
+}
+
+static void clockTick() {
+  if (!dialBuf || !clkBuf) return;
+  time_t now = time(nullptr);
+  tm t;
+  localtime_r(&now, &t);
+  String key;
+  clk::Dial d = makeDial(now, t, S.face, &key);
   if (key != dialKey) {
     clk::renderDial(dialBuf, d);
     dialKey = key;
@@ -798,8 +826,9 @@ static void clockTick() {
   clockStamp = stamp;
   clockForce = false;
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
-  clk::drawHands(clkBuf, S.face, t.tm_hour + t.tm_min / 60.0f + t.tm_sec / 3600.0f, t.tm_min + t.tm_sec / 60.0f,
-                 t.tm_sec, S.secs && S.face != 7);
+  float hh, mm;
+  handTimes(t, hh, mm);
+  clk::drawHands(clkBuf, S.face, hh, mm, t.tm_sec, S.secs && S.face != 7);
   // to the screen at the clock's brightness, leaving the tap overlay alone
   static uint8_t d5[32], d6[64];
   static int dimAt = -1;
@@ -829,13 +858,12 @@ static void startClock() {
   backlight();
 }
 
-// One sensor's state from Home Assistant's REST API, ready to show: temperature and humidity in whole numbers,
-// pressure with its unit ("983 HPA", "29.03 INHG"). "--" if the state isn't a number (e.g. unavailable).
-static bool haFetch(const String &base, const String &token, const String &entity, int kind, String &val, String &err) {
+// GET a Home Assistant API path; the reply body in `body`.
+static bool haGet(const String &base, const String &token, const String &path, String &body, String &err) {
   WiFiClient plain;                 // the connections first: HTTPClient's destructor still uses its client
   WiFiClientSecure tls;
   HTTPClient http;
-  String u = base + "/api/states/" + entity;
+  String u = base + path;
   bool begun;
   if (u.startsWith("https://")) { tls.setInsecure(); begun = http.begin(tls, u); }
   else begun = http.begin(plain, u);
@@ -845,13 +873,22 @@ static bool haFetch(const String &base, const String &token, const String &entit
   http.addHeader("Authorization", "Bearer " + token);
   int code = http.GET();
   if (code != 200) {
-    err = entity + ": " + (code == 401 ? String("token refused (401)") : code == 404 ? String("no such entity (404)")
-                                         : code < 0 ? String("can't reach Home Assistant") : "HTTP " + String(code));
+    err = path + ": " + (code == 401 ? String("token refused (401)") : code == 404 ? String("not found (404)")
+                                       : code < 0 ? String("can't reach Home Assistant") : "HTTP " + String(code));
     http.end();
     return false;
   }
-  String body = http.getString();
+  body = http.getString();
   http.end();
+  return true;
+}
+
+// One sensor's state, ready to show: temperature and humidity in whole numbers, pressure with its unit
+// ("983 HPA", "29.03 INHG"; *hpa gets it in hPa). "--" if the state isn't a number (e.g. unavailable).
+static bool haFetch(const String &base, const String &token, const String &entity, int kind, String &val, String &err,
+                    float *hpa = nullptr) {
+  String body;
+  if (!haGet(base, token, "/api/states/" + entity, body, err)) return false;
   JsonDocument filter;
   filter["state"] = true;
   filter["attributes"]["unit_of_measurement"] = true;
@@ -869,10 +906,31 @@ static bool haFetch(const String &base, const String &token, const String &entit
     unit.toUpperCase();
     val = fabsf(v) >= 100 ? String((int)lroundf(v)) : String(v, 2);   // 983 hPa, 29.03 inHg
     if (unit.length()) val += " " + unit.substring(0, 5);
+    if (hpa) {
+      float k = unit == "INHG" ? 33.8639f : unit == "KPA" ? 10 : unit == "PA" ? 0.01f : unit == "MMHG" ? 1.33322f
+              : unit == "PSI" ? 68.9476f : 1;                                  // hPa, mbar
+      *hpa = v * k;
+    }
   } else {
     val = String((int)lroundf(v));
   }
   return true;
+}
+
+// Pressure every 10 minutes for 3 hours: is it rising or falling?
+static float presHist[19];
+static int presHistN = 0;
+static uint32_t presHistAt = 0;
+static int pressureTrend(float hpa) {
+  if (!presHistN || millis() - presHistAt >= 10 * 60000) {
+    if (presHistN == 19) memmove(presHist, presHist + 1, 18 * sizeof(float));
+    else presHistN++;
+    presHist[presHistN - 1] = hpa;
+    presHistAt = millis();
+  }
+  if (presHistN < 7) return 0;                       // under an hour of readings: no arrow yet
+  float d = hpa - presHist[0];
+  return d >= 1.0f ? 1 : d <= -1.0f ? -1 : 0;
 }
 
 static void haTask(void *) {
@@ -888,15 +946,37 @@ static void haTask(void *) {
     xSemaphoreGive(haLock);
     String err, val[HA_N];
     bool ok[HA_N] = {};
+    float hpa = NAN;
     if (!token.length()) err = "no access token";
     else
       for (int i = 0; i < HA_N; i++)
-        if (ent[i].length()) ok[i] = haFetch(base, token, ent[i], i, val[i], err);
+        if (ent[i].length()) ok[i] = haFetch(base, token, ent[i], i, val[i], err, i == HA_PRES ? &hpa : nullptr);
+    // Home Assistant's elevation (once an hour), to turn a station's pressure into sea-level pressure
+    static uint32_t elevAt = 0;
+    if (token.length() && S.haSea && ent[HA_PRES].length() && (isnan(haElevM) || millis() - elevAt > 3600000)) {
+      String body, e2;
+      if (haGet(base, token, "/api/config", body, e2)) {
+        JsonDocument f, doc;
+        f["elevation"] = true;
+        if (deserializeJson(doc, body, DeserializationOption::Filter(f)) == DeserializationError::Ok &&
+            doc["elevation"].is<float>()) { haElevM = doc["elevation"].as<float>(); elevAt = millis(); }
+      }
+    }
+    String word;
+    int trend = 0;
+    float sea = NAN;
+    if (ok[HA_PRES] && !isnan(hpa)) {
+      float elev = S.haSea && !isnan(haElevM) ? haElevM : 0;
+      sea = hpa / powf(1 - 2.25577e-5f * elev, 5.25588f);
+      word = barometerWord(sea);
+      trend = pressureTrend(hpa);
+    }
     xSemaphoreTake(haLock, portMAX_DELAY);
     for (int i = 0; i < HA_N; i++) {
       if (ok[i]) { haTxt[i] = val[i]; haAt[i] = millis(); }
       if (!ent[i].length()) haAt[i] = 0;
     }
+    if (ok[HA_PRES]) { haPresWord = word; haPresTrend = trend; haPresHpa = hpa; haPresSea = sea; }
     haErr = err;
     xSemaphoreGive(haLock);
   }
@@ -991,6 +1071,13 @@ static void fillClock(JsonObject c) {
       o["value"] = haAt[i] ? haTxt[i] : String("--");
       o["age"] = haAt[i] ? (int32_t)((millis() - haAt[i]) / 1000) : -1;
     }
+    if (haPresWord.length()) {
+      JsonObject b = h["barometer"].to<JsonObject>();
+      b["word"] = haPresWord;
+      b["seaLevelHpa"] = roundf(haPresSea * 10) / 10;
+      b["trend"] = haPresTrend > 0 ? "rising" : haPresTrend < 0 ? "falling" : "steady";
+      if (!isnan(haElevM)) b["elevationM"] = haElevM;
+    }
     h["error"] = haErr;
     xSemaphoreGive(haLock);
   }
@@ -1074,10 +1161,13 @@ static void handleRoot() {
     h += "<option value=" + String(m) + (S.mode == m ? " selected>" : ">") + MODES[m] + "</option>";
   h += "</select></label><p class=note>Auto: dark when Signinator sends nothing. Auto (with clock): the clock "
        "instead, during the hours below. Clock only: always the clock in those hours, pictures ignored.</p>"
-       "<label>Face<select name=face>";
+       "<label>Face<select name=face onchange=\"pv.src='/api/clock.bmp?face='+this.value+'&t='+Date.now()\">";
   for (int f = 0; f < clk::FACE_COUNT; f++)
     h += "<option value=" + String(f) + (S.face == f ? " selected>" : ">") + clk::faceName(f) + "</option>";
   h += "</select></label>"
+       "<img id=pv alt='Clock preview (after the time is set)' src='/api/clock.bmp?face=" + String(S.face) +
+       "' style='width:100%;max-width:320px;aspect-ratio:1;display:block;margin:6px auto;border-radius:10px;background:#000'>"
+       "<p class=note style='text-align:center'>Preview of the face as it would look now. Pick one, then Save.</p>"
        "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
        "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
        "<label>Day starts at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
@@ -1108,6 +1198,9 @@ static void handleRoot() {
   for (int i = 0; i < HA_N; i++)
     h += String("<label>") + HA_LABELS[i] + "<input type=text name=" + HA_KEYS[i] + " placeholder=" + HA_HINTS[i] +
          " value=\"" + esc(S.haEnt[i]) + "\"></label>";
+  h += "<label><input type=checkbox name=hasea " + String(S.haSea ? "checked" : "") +
+       "> The pressure sensor reads local (station) pressure: correct it to sea level with Home Assistant's elevation "
+       "for the barometer word (Stormy, Rain, Change, Fair, Very dry)</label>";
   if (S.ha) {
     static const char *const units[HA_N] = {"&deg;", "&deg;", "%", "%", ""};
     xSemaphoreTake(haLock, portMAX_DELAY);
@@ -1115,6 +1208,9 @@ static void handleRoot() {
     for (int i = 0; i < HA_N; i++)
       if (S.haEnt[i].length())
         st += String(i ? ", " : " ") + HA_LABELS[i] + " " + (haAt[i] ? haTxt[i] + units[i] : String("--"));
+    if (haPresWord.length())
+      st += " (" + haPresWord + ", " + String(haPresSea, 1) + " hPa at sea level" +
+            (haPresTrend > 0 ? ", rising" : haPresTrend < 0 ? ", falling" : "") + ")";
     if (haErr.length()) st += ". Problem: " + esc(haErr);
     xSemaphoreGive(haLock);
     h += "<p class=note>" + st + "</p>";
@@ -1166,6 +1262,7 @@ static void handleSettings() {
     while (u.endsWith("/")) u.remove(u.length() - 1);
     if (u.length()) S.haUrl = u.substring(0, 120);
     if (web.arg("hatok").length()) { S.haToken = web.arg("hatok"); S.haToken.trim(); }
+    S.haSea = web.hasArg("hasea");
     for (int i = 0; i < HA_N; i++) {
       S.haEnt[i] = web.arg(HA_KEYS[i]);
       S.haEnt[i].trim();
@@ -1341,6 +1438,47 @@ static void setupWeb() {
     JsonDocument d;
     fillClock(d.to<JsonObject>());
     sendJson(d);
+  });
+  // A picture of a clock face as it would look now (face=N, default the saved one): 480x480, 16-bit BMP.
+  web.on("/api/clock.bmp", HTTP_GET, [] {
+    if (updating || !timeOk()) { web.send(503, "text/plain", updating ? "Updating firmware" : "Time not set yet"); return; }
+    static uint16_t *pv = nullptr;
+    if (!pv) pv = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+    if (!pv) { web.send(500, "text/plain", "No memory"); return; }
+    int face = web.hasArg("face") ? constrain(web.arg("face").toInt(), 0, clk::FACE_COUNT - 1) : S.face;
+    time_t now = time(nullptr);
+    tm t;
+    localtime_r(&now, &t);
+    clk::Dial d = makeDial(now, t, face, nullptr);
+    clk::renderDial(pv, d);
+    float hh, mm;
+    handTimes(t, hh, mm);
+    clk::drawHands(pv, face, hh, mm, t.tm_sec, S.secs && face != 7);
+    const uint32_t data = (uint32_t)TFT_W * TFT_H * 2, off = 14 + 40 + 12;
+    uint8_t hd[off] = {};
+    auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) hd[at + i] = v >> (8 * i); };
+    hd[0] = 'B'; hd[1] = 'M';
+    put32(2, off + data);
+    put32(10, off);
+    put32(14, 40);
+    put32(18, TFT_W);
+    put32(22, (uint32_t)(-TFT_H));                 // negative height: rows top to bottom
+    hd[26] = 1; hd[28] = 16;
+    put32(30, 3);                                  // BI_BITFIELDS: RGB565
+    put32(34, data);
+    put32(38, 2835); put32(42, 2835);
+    put32(54, 0xF800); put32(58, 0x07E0); put32(62, 0x001F);
+    web.setContentLength(off + data);
+    web.sendHeader("Cache-Control", "no-store");
+    web.send(200, "image/bmp", "");
+    WiFiClient c = web.client();
+    c.write(hd, off);
+    const uint8_t *p = (const uint8_t *)pv;
+    for (uint32_t sent = 0; sent < data && c.connected();) {
+      size_t n = c.write(p + sent, min<uint32_t>(4800, data - sent));
+      if (!n) { delay(2); continue; }
+      sent += n;
+    }
   });
   web.on("/api/restart", HTTP_POST, [] {
     web.send(200, "application/json", "{\"ok\":true}");

@@ -233,6 +233,8 @@ static const Glyph &glyph(char ch) {
       g['%'] = {6, {{0.4f, 10, 5.6f, 0}, a, b}};
     }
     g['.'] = {0, {{0, 9.7f, 0, 9.7f}}};
+    g['{'] = {4, {{2, 10, 2, 0.4f}, {0, 2.6f, 2, 0.4f, 4, 2.6f}}};     // arrow up
+    g['}'] = {4, {{2, 0, 2, 9.6f}, {0, 7.4f, 2, 9.6f, 4, 7.4f}}};    // arrow down
     g[':'] = {0, {{0, 2.8f, 0, 2.8f}, {0, 8.2f, 0, 8.2f}}};
     g['!'] = {0, {{0, 0, 0, 6.6f}, {0, 9.7f, 0, 9.7f}}};
     {
@@ -967,16 +969,29 @@ static void tempWindow(uint16_t *buf, const Theme &t, float cx, float cy, const 
   }
 }
 
-static void pressureWindow(uint16_t *buf, const Theme &t, const char *pres) {
+// Pressure below 12: the barometer word over the reading (with a rising / falling arrow).
+static void pressureWindow(uint16_t *buf, const Theme &t, const Dial &d) {
   const float x = CX, y = CY - 96;
-  Shape win, txt;
-  text(txt, pres, x, y, 12, 2.0f, 1.8f);
-  float hw = (txt.x1 - txt.x0) / 2 + 12;
-  if (hw < 36) hw = 36;
-  win.box(x, y, hw, 14, 7);
+  char line[24];
+  snprintf(line, sizeof line, "%s%s", d.pres, d.presTrend > 0 ? " {" : d.presTrend < 0 ? " }" : "");
+  Shapes word, num;
+  bool two = d.presWord[0] != 0;
+  if (two) {
+    text(word, d.presWord, x, y - 7, 13, 2.4f, 2.0f);
+    text(num, line, x, y + 11, 8, 1.6f, 1.8f);
+  } else {
+    text(num, line, x, y, 12, 2.0f, 1.8f);
+  }
+  float x0 = 1e9f, x1 = -1e9f;
+  for (auto *v : {&word, &num})
+    for (auto &g : *v) { x0 = fminf(x0, g.x0); x1 = fmaxf(x1, g.x1); }
+  float hw = fmaxf(36, (x1 - x0) / 2 + 12);
+  Shape win;
+  win.box(x, y, hw, two ? 21 : 14, 8);
   fill(buf, win, t.windowEdge, 1, 1.5f);
   fill(buf, win, t.window);
-  fill(buf, txt, t.ink);
+  fillAll(buf, word, t.ink);
+  fillAll(buf, num, two ? t.label : t.ink);
 }
 
 static void moonWindow(uint16_t *buf, const Theme &t, float phase) {
@@ -1020,7 +1035,7 @@ void renderDial(uint16_t *buf, const Dial &d) {
     tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
   }
   if ((f == 6 || f == 8) && d.daysToXmas >= 0) countdownWindow(buf, t, d.daysToXmas);   // in place of the pressure
-  else if (d.pres[0]) pressureWindow(buf, t, d.pres);
+  else if (d.pres[0]) pressureWindow(buf, t, d);
   if (d.moon) moonWindow(buf, t, d.moonPhase);
 }
 
