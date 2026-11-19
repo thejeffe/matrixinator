@@ -717,6 +717,7 @@ static uint16_t *baseBuf = nullptr;          // the face's still parts, kept: a 
 static char baseKeyNow[48] = "";
 static clk::Dial dialReq;
 static String dialReqKey;
+static int dialReqH = 0, dialReqM = 0;      // the minute drawn in (faces with digits)
 static volatile bool dialBusy = false, dialReady = false;
 static int dialFace = -1;                    // the face dialBuf holds (-1: none yet)
 static TaskHandle_t dialTaskH = nullptr;
@@ -733,6 +734,7 @@ static void dialTask(void *) {
     }
     memcpy(dialBack, baseBuf, (size_t)TFT_W * TFT_H * 2);
     clk::renderExtras(dialBack, dialReq);
+    if (clk::faceHasMinuteLayer(dialReq.face)) clk::drawMinuteLayer(dialBack, dialReq.face, dialReqH, dialReqM);
     dialRenderMs = millis() - t0;
     dialReady = true;
   }
@@ -839,19 +841,42 @@ static void clockTick() {
   localtime_r(&now, &t);
   String key;
   clk::Dial d = makeDial(now, t, S.face, &key);
-  if (dialReady) {                                     // a new dial is done: swap it in
-    std::swap(dialBuf, dialBack);
-    dialKey = dialReqKey;
-    dialFace = dialReq.face;
-    dialReady = false;
-    dialBusy = false;
-    clockForce = true;
+  // Faces with digits have the minute drawn into the dial (it's slow), so the dial changes every minute; from
+  // :45 the next minute's is drawn ahead, and swapped in when the minute turns.
+  const bool ml = clk::faceHasMinuteLayer(S.face);
+  if (ml) key += "|" + hhmm(t.tm_hour * 60 + t.tm_min);
+  String nextKey;
+  clk::Dial dn;
+  tm tn;
+  if (ml && t.tm_sec >= 45) {
+    time_t nx = now + 60;
+    localtime_r(&nx, &tn);
+    dn = makeDial(nx, tn, S.face, &nextKey);
+    nextKey += "|" + hhmm(tn.tm_hour * 60 + tn.tm_min);
   }
-  if (key != dialKey && !dialBusy && dialTaskH) {
-    dialReq = d;
-    dialReqKey = key;
-    dialBusy = true;
-    xTaskNotifyGive(dialTaskH);
+  if (dialReady) {
+    if (dialReqKey == key) {                           // a new dial is done and it's time for it: swap it in
+      std::swap(dialBuf, dialBack);
+      dialKey = dialReqKey;
+      dialFace = dialReq.face;
+      dialReady = false;
+      dialBusy = false;
+      clockForce = true;
+    } else if (dialReqKey != nextKey) {                // out of date (settings changed meanwhile): drop it
+      dialReady = false;
+      dialBusy = false;
+    }
+  }
+  if (!dialBusy && dialTaskH) {
+    bool now_ = key != dialKey, ahead = !now_ && nextKey.length() && nextKey != dialReqKey;
+    if (now_ || ahead) {
+      dialReq = now_ ? d : dn;
+      dialReqKey = now_ ? key : nextKey;
+      dialReqH = now_ ? t.tm_hour : tn.tm_hour;
+      dialReqM = now_ ? t.tm_min : tn.tm_min;
+      dialBusy = true;
+      xTaskNotifyGive(dialTaskH);
+    }
   }
   if (dialFace < 0) return;                            // the first dial isn't ready yet
   const int face = dialFace;                                     // hands to match the dial on show
@@ -866,7 +891,7 @@ static void clockTick() {
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
   float hh, mm;
   handTimes(t, hh, mm);
-  clk::drawHands(clkBuf, face, hh, mm, t.tm_sec, secs);
+  clk::drawSecondLayer(clkBuf, face, hh, mm, t.tm_sec, secs);   // the minute layer is in the dial
   // to the screen at the clock's brightness, leaving the tap overlay alone
   static uint8_t d5[32], d6[64];
   static int dimAt = -1;

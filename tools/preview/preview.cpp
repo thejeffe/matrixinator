@@ -39,14 +39,17 @@ int main(int argc, char **argv) {
       clk::renderDial(dial.data(), d);
       auto t1 = std::chrono::steady_clock::now();
       out = dial;
-      clk::drawHands(out.data(), f, 10 + 9 / 60.0f, 9 + 36 / 60.0f, 36, true);
+      clk::drawMinuteLayer(out.data(), f, 10, 9);
+      auto t15 = std::chrono::steady_clock::now();
+      clk::drawSecondLayer(out.data(), f, 10 + 9 / 60.0f, 9 + 36 / 60.0f, 36, true);
       auto t2 = std::chrono::steady_clock::now();
       char p[256];
       snprintf(p, sizeof p, "%s/%s%s.ppm", dir, clk::faceName(f), v ? "-plain" : "");
       writePPM(p, out.data());
-      printf("%-10s dial %.1f ms, hands %.1f ms\n", clk::faceName(f),
+      printf("%-12s dial %5.1f ms, minute layer %5.1f ms, second layer %4.1f ms\n", clk::faceName(f),
              std::chrono::duration<double, std::milli>(t1 - t0).count(),
-             std::chrono::duration<double, std::milli>(t2 - t1).count());
+             std::chrono::duration<double, std::milli>(t15 - t1).count(),
+             std::chrono::duration<double, std::milli>(t2 - t15).count());
     }
   }
   return 0;

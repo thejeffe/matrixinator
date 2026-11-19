@@ -37,8 +37,13 @@ void renderDial(uint16_t *buf, const Dial &d);    // W*H RGB565, every pixel wri
 void renderBase(uint16_t *buf, const Dial &d);
 void renderExtras(uint16_t *buf, const Dial &d);
 void baseKey(const Dial &d, char *out, int n);
-// Hands every second (the Advent face shows the time as digits instead).
-void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
+// The time over the dial, in two layers. Faces with digits (Advent, Red LED, VFD, Nixie, Flip) draw their big
+// digits in the minute layer, which is slow and only changes once a minute; everything else (hands, colon,
+// seconds, AM/PM) is the second layer, drawn every tick on a copy of dial + minute layer.
+bool faceHasMinuteLayer(int face);
+void drawMinuteLayer(uint16_t *buf, int face, int hour24, int minute);
+void drawSecondLayer(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
+void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);   // both
 
 void init();                             // build the font once, before drawing from two tasks at a time
 void setYield(void (*fn)());             // called now and then during long drawing (lets other tasks run)

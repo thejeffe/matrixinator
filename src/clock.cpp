@@ -1083,8 +1083,9 @@ static void digitalBase(uint16_t *buf, int f) {
   }
 }
 
-// The time: lit digits (7-segment faces), glowing numerals in the tubes (Nixie), or white digits on the cards.
-static void digitalTime(uint16_t *buf, int f, int h24, int m, int sec, bool showSeconds) {
+// The time on a digital face, in two layers. Minute layer (slow, drawn once a minute): the big digits.
+// Second layer (quick, every tick): blinking colon, seconds, AM/PM.
+static void digitalMinute(uint16_t *buf, int f, int h24, int m) {
   const Digi &c = digi(f);
   int h12 = (h24 + 11) % 12 + 1;
   if (f == F_LED || f == F_VFD) {
@@ -1093,12 +1094,6 @@ static void digitalTime(uint16_t *buf, int f, int h24, int m, int sec, bool show
     seg7(&on, nullptr, h12 % 10, DX[1], DY, DW, DH, 17);
     seg7(&on, nullptr, m / 10, DX[2], DY, DW, DH, 17);
     seg7(&on, nullptr, m % 10, DX[3], DY, DW, DH, 17);
-    if (!showSeconds || sec % 2 == 0) colonDots(on, CX, DY, DH, 8);       // the colon blinks with seconds
-    if (showSeconds) {
-      seg7(&on, nullptr, sec / 10, SX[0], SY, SW, SH, 7);
-      seg7(&on, nullptr, sec % 10, SX[1], SY, SW, SH, 7);
-    }
-    text(on, h24 < 12 ? "AM" : "PM", 70, h24 < 12 ? 300 : 330, 16, 2.8f, 1.8f);
     glowFill(buf, on, c, f == F_VFD ? 12 : 10);
   } else if (f == F_NIXIE) {
     char d[4] = {(char)('0' + h12 / 10), (char)('0' + h12 % 10), (char)('0' + m / 10), (char)('0' + m % 10)};
@@ -1107,19 +1102,10 @@ static void digitalTime(uint16_t *buf, int f, int h24, int m, int sec, bool show
       char s1[2] = {d[i], 0};
       Shapes g;
       text(g, s1, DX[i] + DW / 2, DY + DH / 2, 150, 7);
-      fillAll(buf, g, c.glow, 0.6f, 4, 18);
+      fillAll(buf, g, c.glow, 0.6f, 3, 12);
       fillAll(buf, g, c.on);
       fillAll(buf, g, {255, 226, 180}, 1, -2.2f);
     }
-    Shapes dots;
-    if (!showSeconds || sec % 2 == 0) colonDots(dots, CX, DY, DH, 6, 0);
-    glowFill(buf, dots, c, 10);
-    Shapes ap;
-    char sx[12];
-    if (showSeconds) snprintf(sx, sizeof sx, "%s  %02d", h24 < 12 ? "AM" : "PM", sec);
-    else snprintf(sx, sizeof sx, "%s", h24 < 12 ? "AM" : "PM");
-    text(ap, sx, CX, 322, 18, 3, 2.0f);
-    glowFill(buf, ap, c, 8);
   } else {                                               // Flip
     char hs[4], ms[4];
     snprintf(hs, sizeof hs, "%d", h12);
@@ -1138,6 +1124,32 @@ static void digitalTime(uint16_t *buf, int f, int h24, int m, int sec, bool show
       fill(buf, n1, {14, 14, 16});
       fill(buf, n2, {14, 14, 16});
     }
+  }
+}
+
+static void digitalSecond(uint16_t *buf, int f, int h24, int sec, bool showSeconds) {
+  const Digi &c = digi(f);
+  bool colon = !showSeconds || sec % 2 == 0;               // the colon blinks with the seconds
+  if (f == F_LED || f == F_VFD) {
+    Shapes on;
+    if (colon) colonDots(on, CX, DY, DH, 8);
+    if (showSeconds) {
+      seg7(&on, nullptr, sec / 10, SX[0], SY, SW, SH, 7);
+      seg7(&on, nullptr, sec % 10, SX[1], SY, SW, SH, 7);
+    }
+    text(on, h24 < 12 ? "AM" : "PM", 70, h24 < 12 ? 300 : 330, 16, 2.8f, 1.8f);
+    glowFill(buf, on, c, f == F_VFD ? 12 : 10);
+  } else if (f == F_NIXIE) {
+    Shapes dots;
+    if (colon) colonDots(dots, CX, DY, DH, 6, 0);
+    glowFill(buf, dots, c, 10);
+    Shapes ap;
+    char sx[12];
+    if (showSeconds) snprintf(sx, sizeof sx, "%s  %02d", h24 < 12 ? "AM" : "PM", sec);
+    else snprintf(sx, sizeof sx, "%s", h24 < 12 ? "AM" : "PM");
+    text(ap, sx, CX, 322, 18, 3, 2.0f);
+    glowFill(buf, ap, c, 8);
+  } else {                                               // Flip
     Shapes small;
     text(small, h24 < 12 ? "AM" : "PM", 56, 290, 13, 2.4f, 1.8f);
     if (showSeconds) { char sx[4]; snprintf(sx, sizeof sx, "%02d", sec); text(small, sx, 424, 290, 13, 2.4f, 1.8f); }
@@ -1279,11 +1291,25 @@ static void adventTime(uint16_t *buf, float hour, float minute) {
   fillAll(buf, b, {244, 214, 120});
 }
 
+bool faceHasMinuteLayer(int f) { return f == F_ADVENT || isDigital(f); }
+
+void drawMinuteLayer(uint16_t *buf, int face, int h24, int minute) {
+  int f = face < 0 || face >= FACE_COUNT ? 0 : face;
+  if (f == F_ADVENT) adventTime(buf, h24, minute);
+  else if (isDigital(f)) digitalMinute(buf, f, h24 % 24, minute % 60);
+}
+
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds) {
   int f = face < 0 || face >= FACE_COUNT ? 0 : face;
+  if (faceHasMinuteLayer(f)) drawMinuteLayer(buf, f, (int)hour, (int)minute);
+  drawSecondLayer(buf, f, hour, minute, second, showSeconds);
+}
+
+void drawSecondLayer(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds) {
+  int f = face < 0 || face >= FACE_COUNT ? 0 : face;
   const Theme &t = THEMES[f];
-  if (f == F_ADVENT) { adventTime(buf, hour, minute); return; }
-  if (isDigital(f)) { digitalTime(buf, f, (int)hour % 24, (int)minute % 60, (int)second % 60, showSeconds); return; }
+  if (f == F_ADVENT) return;
+  if (isDigital(f)) { digitalSecond(buf, f, (int)hour % 24, (int)second % 60, showSeconds); return; }
   float ah = fmodf(hour, 12) / 12 * PI2, am = minute / 60 * PI2, as = second / 60 * PI2;
   Shape s;
   handShapes(f, 0, ah, s);
