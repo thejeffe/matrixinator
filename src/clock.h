@@ -32,6 +32,8 @@ void renderDial(uint16_t *buf, const Dial &d);    // W*H RGB565, every pixel wri
 // Hands every second (the Advent face shows the time as digits instead).
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 
+void init();                             // build the font once, before drawing from two tasks at a time
+
 float moonPhase(time_t utc);             // 0..1
 const char *moonName(float phase);
 

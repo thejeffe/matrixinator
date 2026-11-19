@@ -117,15 +117,48 @@ static void fill(uint16_t *buf, const Shape &s, C3 c, float alpha = 1, float gro
   if (ya < 0) ya = 0;
   if (xb > W - 1) xb = W - 1;
   if (yb > H - 1) yb = H - 1;
-  for (int y = ya; y <= yb; y++) {
-    uint16_t *row = buf + y * W;
-    float py = y + 0.5f - oy;
-    for (int x = xa; x <= xb; x++) {
-      float d = s.sdf(x + 0.5f - ox, py) - grow;
-      float a = clamp01(0.5f - d / soft) * alpha;
-      if (a > 0.002f) blend(row[x], c, a);
+  // 8x8 blocks: the distance at a block's centre says whether the whole block is outside (skip it), inside
+  // (fill it) or on the edge (work out each pixel). The distance changes by at most 1 per pixel moved.
+  const int B = 8;
+  const float reach = (B - 1) * 0.5f * 1.41422f, half = 0.5f * soft;
+  const uint16_t solid = pack(c);
+  for (int by = ya; by <= yb; by += B) {
+    int ey = by + B - 1 < yb ? by + B - 1 : yb;
+    for (int bx = xa; bx <= xb; bx += B) {
+      int ex = bx + B - 1 < xb ? bx + B - 1 : xb;
+      float d0 = s.sdf((bx + ex) * 0.5f + 0.5f - ox, (by + ey) * 0.5f + 0.5f - oy) - grow;
+      if (d0 - reach >= half) continue;                        // all outside
+      if (d0 + reach <= -half) {                               // all inside
+        for (int y = by; y <= ey; y++) {
+          uint16_t *row = buf + y * W;
+          if (alpha >= 0.998f) for (int x = bx; x <= ex; x++) row[x] = solid;
+          else for (int x = bx; x <= ex; x++) blend(row[x], c, alpha);
+        }
+        continue;
+      }
+      for (int y = by; y <= ey; y++) {
+        uint16_t *row = buf + y * W;
+        float py = y + 0.5f - oy;
+        for (int x = bx; x <= ex; x++) {
+          float d = s.sdf(x + 0.5f - ox, py) - grow;
+          float a = clamp01(0.5f - d / soft) * alpha;
+          if (a > 0.002f) blend(row[x], c, a);
+        }
+      }
     }
   }
+}
+
+// atan2 to about 0.00001 rad, several times quicker than the library's on the ESP32.
+static inline float fastAtan2(float y, float x) {
+  float ax = fabsf(x), ay = fabsf(y);
+  if (ax < 1e-9f && ay < 1e-9f) return 0;
+  bool swap = ay > ax;
+  float z = swap ? ax / ay : ay / ax, z2 = z * z;
+  float r = z * (0.99997726f + z2 * (-0.33262347f + z2 * (0.19354346f + z2 * (-0.11643287f + z2 * (0.05265332f + z2 * -0.01172120f)))));
+  if (swap) r = 1.57079633f - r;
+  if (x < 0) r = 3.14159265f - r;
+  return y < 0 ? -r : r;
 }
 
 // ---------- positions on the dial (clock angle: 0 = 12 o'clock, clockwise, radians) ----------
@@ -363,7 +396,7 @@ static void background(uint16_t *buf, int face) {
     for (int x = 0; x < W; x++) {
       float dx = x + 0.5f - CX, dy = y + 0.5f - CY;
       float r = sqrtf(dx * dx + dy * dy);
-      float a = atan2f(dx, -dy);
+      float a = fastAtan2(dx, -dy);
       if (a < 0) a += PI2;
       C3 c = {0, 0, 0};
       switch (face) {
@@ -377,7 +410,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, mul(GOLD, 0.6f), band(r, 124, 125));
           c = mix(c, mul(GOLD, 0.95f), band(r, 218.5f, 221.5f));
           c = mix(c, {4, 4, 4}, band(r, 221.5f, 226));
-          c = mix(c, metal(GOLD, r, 226, 238, a), band(r, 226, 238));
+          if (r > 225 && r < 239) c = mix(c, metal(GOLD, r, 226, 238, a), band(r, 226, 238));
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
@@ -402,7 +435,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, mul(SILVER, 0.8f), band(r, 179, 180.5f));
           c = mix(c, mul(SILVER, 0.55f), band(r, 46, 47));
           c = mix(c, {12, 13, 15}, band(r, 222, 228));
-          c = mix(c, metal(SILVER, r, 228, 238, a), band(r, 228, 238));
+          if (r > 227 && r < 239) c = mix(c, metal(SILVER, r, 228, 238, a), band(r, 228, 238));
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
@@ -413,7 +446,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {24, 132, 112}, band(r, 126, 134));
           c = mix(c, {24, 24, 24}, band(r, 135.5f, 137));
           c = mix(c, {16, 16, 16}, band(r, 200, 228));
-          c = mix(c, metal(BRASS, r, 228, 238, a), band(r, 228, 238));
+          if (r > 227 && r < 239) c = mix(c, metal(BRASS, r, 228, 238, a), band(r, 228, 238));
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
@@ -421,7 +454,7 @@ static void background(uint16_t *buf, int face) {
           float t = r / 220;
           c = mix({184, 222, 244}, {120, 182, 228}, t * t);
           c = mix(c, {250, 250, 250}, band(r, 218, 226));
-          c = mix(c, metal({214, 56, 56}, r, 226, 238, a), band(r, 226, 238));
+          if (r > 225 && r < 239) c = mix(c, metal({214, 56, 56}, r, 226, 238, a), band(r, 226, 238));
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
@@ -455,7 +488,7 @@ static void background(uint16_t *buf, int face) {
             float edgePx = d * PI2 * r / 40;
             float red = clamp01(edgePx + 0.5f);
             C3 stripe = mix({248, 248, 244}, {210, 30, 40}, red);
-            c = mix(c, metal(stripe, r, 222, 238, a + 0.8f), band(r, 222, 238));
+            if (r > 221 && r < 239) c = mix(c, metal(stripe, r, 222, 238, a + 0.8f), band(r, 222, 238));
           }
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
@@ -486,7 +519,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {60, 78, 124}, band(r, 48.5f, 49.5f));
           c = mix(c, {70, 90, 140}, band(r, 196, 197.5f));
           c = mix(c, {4, 6, 14}, band(r, 222, 228));
-          c = mix(c, metal(mul(SILVER, 0.8f), r, 228, 238, a), band(r, 228, 238));
+          if (r > 227 && r < 239) c = mix(c, metal(mul(SILVER, 0.8f), r, 228, 238, a), band(r, 228, 238));
           c = mix(c, {2, 2, 4}, clamp01(r - 238 + 0.5f));
           break;
         }
@@ -1195,6 +1228,8 @@ const char *moonName(float p) {
                              "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"};
   return n[(int)floorf(p * 8 + 0.5f) % 8];
 }
+
+void init() { glyph('0'); }
 
 const char *faceName(int f) {
   static const char *n[FACE_COUNT] = {"Gatsby", "Skyline", "Ivory", "Midnight", "Pup",

@@ -710,6 +710,24 @@ static void hideOverlay() {
 // it changes. Each second: copy it, add the hands, copy that to the screen at the clock's brightness.
 static uint16_t *dialBuf = nullptr, *clkBuf = nullptr;
 static String dialKey;
+// A new dial is drawn by its own task into dialBack (it takes a few seconds on this chip), then swapped in;
+// meanwhile the hands keep going on the old one.
+static uint16_t *dialBack = nullptr;
+static clk::Dial dialReq;
+static String dialReqKey;
+static volatile bool dialBusy = false, dialReady = false;
+static int dialFace = -1;                    // the face dialBuf holds (-1: none yet)
+static TaskHandle_t dialTaskH = nullptr;
+static volatile uint32_t dialRenderMs = 0;
+static void dialTask(void *) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    uint32_t t0 = millis();
+    clk::renderDial(dialBack, dialReq);
+    dialRenderMs = millis() - t0;
+    dialReady = true;
+  }
+}
 static int32_t clockStamp = -1;
 static uint32_t clockPeekUntil = 0;          // a tap on the dark screen: the clock for a while, whatever the hours
 static const uint32_t CLOCK_PEEK_MS = 30000;
@@ -811,13 +829,24 @@ static void clockTick() {
   localtime_r(&now, &t);
   String key;
   clk::Dial d = makeDial(now, t, S.face, &key);
-  if (key != dialKey) {
-    clk::renderDial(dialBuf, d);
-    dialKey = key;
+  if (dialReady) {                                     // a new dial is done: swap it in
+    std::swap(dialBuf, dialBack);
+    dialKey = dialReqKey;
+    dialFace = dialReq.face;
+    dialReady = false;
+    dialBusy = false;
     clockForce = true;
   }
-  const bool lights = S.face == 8;                               // Lit Up: the bulbs step every second
-  const bool secs = (S.secs || lights) && S.face != 7;            // Advent shows minutes only
+  if (key != dialKey && !dialBusy && dialTaskH) {
+    dialReq = d;
+    dialReqKey = key;
+    dialBusy = true;
+    xTaskNotifyGive(dialTaskH);
+  }
+  if (dialFace < 0) return;                            // the first dial isn't ready yet
+  const int face = dialFace;                                     // hands to match the dial on show
+  const bool lights = face == 8;                                 // Lit Up: the bulbs step every second
+  const bool secs = (S.secs || lights) && face != 7;             // Advent shows minutes only
   int bri = clockBri();
   static int briShown = -1;
   if (bri != briShown) { briShown = bri; clockForce = true; }
@@ -828,7 +857,7 @@ static void clockTick() {
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
   float hh, mm;
   handTimes(t, hh, mm);
-  clk::drawHands(clkBuf, S.face, hh, mm, t.tm_sec, S.secs && S.face != 7);
+  clk::drawHands(clkBuf, face, hh, mm, t.tm_sec, S.secs && face != 7);
   // to the screen at the clock's brightness, leaving the tap overlay alone
   static uint8_t d5[32], d6[64];
   static int dimAt = -1;
@@ -846,6 +875,7 @@ static void clockTick() {
       fb[i] = (d5[c >> 11] << 11) | (d6[(c >> 5) & 63] << 5) | d5[c & 31];
     }
   Cache_WriteBack_Addr((uint32_t)fb, n * 2);
+  if (asleep) { asleep = false; backlight(); }        // the clock first, then the light
 }
 
 static void startClock() {
@@ -853,8 +883,7 @@ static void startClock() {
   idleSince = 0; peekUntil = 0;
   clockShown = true;
   clockForce = true;
-  clockTick();                          // the clock first, then the light
-  asleep = false;
+  clockTick();
   backlight();
 }
 
@@ -1045,6 +1074,7 @@ static void fillClock(JsonObject c) {
   c["face"] = clk::faceName(S.face);
   c["faceIndex"] = S.face;
   c["showing"] = clockShown;
+  c["dialMs"] = dialRenderMs;             // how long the last dial took to draw
   c["time"] = nowText();
   c["timeSet"] = timeOk();
   c["on"] = hhmm(S.clkOn);
@@ -1450,10 +1480,12 @@ static void setupWeb() {
     tm t;
     localtime_r(&now, &t);
     clk::Dial d = makeDial(now, t, face, nullptr);
+    uint32_t t0 = millis();
     clk::renderDial(pv, d);
     float hh, mm;
     handTimes(t, hh, mm);
     clk::drawHands(pv, face, hh, mm, t.tm_sec, S.secs && face != 7);
+    web.sendHeader("X-Render-Ms", String(millis() - t0));
     const uint32_t data = (uint32_t)TFT_W * TFT_H * 2, off = 14 + 40 + 12;
     uint8_t hd[off] = {};
     auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) hd[at + i] = v >> (8 * i); };
@@ -1518,6 +1550,8 @@ void setup() {
   bufLock = xSemaphoreCreateMutex();
   haLock = xSemaphoreCreateMutex();
   dialBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+  dialBack = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+  clk::init();
   clkBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
@@ -1552,6 +1586,8 @@ void setup() {
   streamDrawn = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(photoTask, "photo", 6144, nullptr, 4, nullptr, 0);
   xTaskCreatePinnedToCore(haTask, "ha", 10240, nullptr, 1, nullptr, 0);
+  // priority 0: shares core 0 with the idle task, so a long drawing never trips the watchdog
+  xTaskCreatePinnedToCore(dialTask, "dial", 8192, nullptr, 0, &dialTaskH, 0);
   applyTz();                          // internet time (keeps trying in the background)
   setupWeb();
   showIdle();
