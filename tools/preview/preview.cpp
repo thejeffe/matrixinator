@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
       d.temps = v == 0;
       strcpy(d.in, "71");
       strcpy(d.out, f == 3 ? "-4" : "48");
+      if (v == 0) { strcpy(d.inHum, "55"); strcpy(d.outHum, "74"); strcpy(d.pres, f == 1 ? "29.03 INHG" : "983 HPA"); }
       auto t0 = std::chrono::steady_clock::now();
       clk::renderDial(dial.data(), d);
       auto t1 = std::chrono::steady_clock::now();

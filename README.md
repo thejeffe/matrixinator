@@ -25,8 +25,10 @@ Faces: **Gatsby** (black and gold sunburst), **Skyline** (steel, a crown of step
 black chapter ring, jade), **Midnight** (navy and silver, quiet at night). Options: second hand, moon phase,
 clock brightness, time zone (time comes from NTP).
 
-**Home Assistant temperatures**: the URL, a long-lived access token (HA: Profile > Security) and the inside and
-outside sensor entity ids. The screen reads `GET /api/states/<entity>` every minute and shows whole degrees.
+**Home Assistant weather**: the URL, a long-lived access token (HA: Profile > Security) and up to five sensor
+entity ids: inside and outside temperature, inside and outside humidity, air pressure (any can be left empty).
+The screen reads `GET /api/states/<entity>` every minute. Temperatures and humidity sit in IN / OUT windows
+either side of the centre; pressure (with HA's unit, e.g. 983 HPA or 29.03 INHG) in a window below 12.
 
 `GET /api/clock` gives the clock's status; `POST /api/clock?preview=30` shows it for 30 s; `POST /api/clock`
 with `{"face":1}` or `{"mode":1}` changes the face or mode.

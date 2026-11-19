@@ -50,9 +50,18 @@ struct Settings {
   String tz = "PST8PDT,M3.2.0,M11.1.0";
   // Home Assistant temperatures
   bool ha = false;
-  String haUrl = "http://homeassistant.local:8123", haToken, haIn, haOut;
+  String haUrl = "http://homeassistant.local:8123", haToken;
+  String haEnt[5];          // entity ids: inside temp, outside temp, inside humidity, outside humidity, pressure
 } S;
 static Preferences prefs;
+// Home Assistant readings, in this order everywhere
+enum { HA_IN_T, HA_OUT_T, HA_IN_H, HA_OUT_H, HA_PRES, HA_N };
+static const char *const HA_KEYS[HA_N] = {"hain", "haout", "hainh", "haouth", "hapres"};
+static const char *const HA_LABELS[HA_N] = {"Inside temperature", "Outside temperature", "Inside humidity",
+                                            "Outside humidity", "Air pressure"};
+static const char *const HA_HINTS[HA_N] = {"sensor.living_room_temperature", "sensor.outdoor_temperature",
+                                           "sensor.living_room_humidity", "sensor.outdoor_humidity",
+                                           "sensor.outdoor_pressure"};
 
 static void loadSettings() {
   prefs.begin("mx", true);
@@ -77,8 +86,7 @@ static void loadSettings() {
   S.ha = prefs.getBool("ha", false);
   S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
   S.haToken = prefs.getString("hatok", "");
-  S.haIn = prefs.getString("hain", "");
-  S.haOut = prefs.getString("haout", "");
+  for (int i = 0; i < 5; i++) S.haEnt[i] = prefs.getString(HA_KEYS[i], "");
   prefs.end();
 }
 static void saveSettings() {
@@ -104,8 +112,7 @@ static void saveSettings() {
   prefs.putBool("ha", S.ha);
   prefs.putString("haurl", S.haUrl);
   prefs.putString("hatok", S.haToken);
-  prefs.putString("hain", S.haIn);
-  prefs.putString("haout", S.haOut);
+  for (int i = 0; i < 5; i++) prefs.putString(HA_KEYS[i], S.haEnt[i]);
   prefs.end();
 }
 
@@ -700,8 +707,8 @@ static const uint32_t CLOCK_PEEK_MS = 30000;
 
 // Home Assistant (its own task, so a slow reply never holds up the screen)
 static SemaphoreHandle_t haLock;
-static String haInTxt = "--", haOutTxt = "--", haErr;
-static uint32_t haInAt = 0, haOutAt = 0, haTriedAt = 0;
+static String haTxt[HA_N], haErr;        // ready to show: "71", "54", "983 HPA"
+static uint32_t haAt[HA_N] = {}, haTriedAt = 0;   // when each was last read (0 = never)
 static volatile bool haKick = true;
 static const uint32_t HA_EVERY_MS = 60000, HA_STALE_MS = 30 * 60000;
 
@@ -742,13 +749,20 @@ static void clockTick() {
   if (S.ha) {
     xSemaphoreTake(haLock, portMAX_DELAY);
     uint32_t ms = millis();
-    String in = haInAt && ms - haInAt < HA_STALE_MS ? haInTxt : String("--");
-    String out = haOutAt && ms - haOutAt < HA_STALE_MS ? haOutTxt : String("--");
+    String v[HA_N];
+    for (int i = 0; i < HA_N; i++)
+      v[i] = !S.haEnt[i].length() ? String("") : haAt[i] && ms - haAt[i] < HA_STALE_MS ? haTxt[i] : String("--");
     xSemaphoreGive(haLock);
-    strlcpy(d.in, in.c_str(), sizeof d.in);
-    strlcpy(d.out, out.c_str(), sizeof d.out);
+    strlcpy(d.in, v[HA_IN_T].length() ? v[HA_IN_T].c_str() : "--", sizeof d.in);
+    strlcpy(d.out, v[HA_OUT_T].length() ? v[HA_OUT_T].c_str() : "--", sizeof d.out);
+    strlcpy(d.inHum, v[HA_IN_H].c_str(), sizeof d.inHum);
+    strlcpy(d.outHum, v[HA_OUT_H].c_str(), sizeof d.outHum);
+    strlcpy(d.pres, v[HA_PRES].c_str(), sizeof d.pres);
+    if (!d.inHum[0] && d.outHum[0]) strlcpy(d.inHum, "--", sizeof d.inHum);   // both windows the same height
+    if (!d.outHum[0] && d.inHum[0]) strlcpy(d.outHum, "--", sizeof d.outHum);
   }
-  String key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out;
+  String key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out + "|" +
+               d.inHum + "|" + d.outHum + "|" + d.pres;
   if (key != dialKey) {
     clk::renderDial(dialBuf, d);
     dialKey = key;
@@ -790,8 +804,9 @@ static void startClock() {
   backlight();
 }
 
-// One sensor's state from Home Assistant's REST API, rounded to a whole number ("--" if it isn't a number).
-static bool haFetch(const String &base, const String &token, const String &entity, String &val, String &err) {
+// One sensor's state from Home Assistant's REST API, ready to show: temperature and humidity in whole numbers,
+// pressure with its unit ("983 HPA", "29.03 INHG"). "--" if the state isn't a number (e.g. unavailable).
+static bool haFetch(const String &base, const String &token, const String &entity, int kind, String &val, String &err) {
   WiFiClient plain;                 // the connections first: HTTPClient's destructor still uses its client
   WiFiClientSecure tls;
   HTTPClient http;
@@ -814,6 +829,7 @@ static bool haFetch(const String &base, const String &token, const String &entit
   http.end();
   JsonDocument filter;
   filter["state"] = true;
+  filter["attributes"]["unit_of_measurement"] = true;
   JsonDocument doc;
   if (deserializeJson(doc, body, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
     err = entity + ": unreadable reply";
@@ -823,7 +839,14 @@ static bool haFetch(const String &base, const String &token, const String &entit
   char *end = nullptr;
   float v = strtof(st, &end);
   if (!st[0] || end == st) { err = entity + " is " + (st[0] ? st : "empty"); val = "--"; return true; }
-  val = String((int)lroundf(v));
+  if (kind == HA_PRES) {
+    String unit = doc["attributes"]["unit_of_measurement"] | "";
+    unit.toUpperCase();
+    val = fabsf(v) >= 100 ? String((int)lroundf(v)) : String(v, 2);   // 983 hPa, 29.03 inHg
+    if (unit.length()) val += " " + unit.substring(0, 5);
+  } else {
+    val = String((int)lroundf(v));
+  }
   return true;
 }
 
@@ -835,18 +858,20 @@ static void haTask(void *) {
     haKick = false;
     haTriedAt = millis();
     xSemaphoreTake(haLock, portMAX_DELAY);
-    String base = S.haUrl, token = S.haToken, ein = S.haIn, eout = S.haOut;
+    String base = S.haUrl, token = S.haToken, ent[HA_N];
+    for (int i = 0; i < HA_N; i++) ent[i] = S.haEnt[i];
     xSemaphoreGive(haLock);
-    String err, vin, vout;
+    String err, val[HA_N];
+    bool ok[HA_N] = {};
     if (!token.length()) err = "no access token";
-    bool okIn = false, okOut = false;
-    if (token.length() && ein.length()) okIn = haFetch(base, token, ein, vin, err);
-    if (token.length() && eout.length()) okOut = haFetch(base, token, eout, vout, err);
+    else
+      for (int i = 0; i < HA_N; i++)
+        if (ent[i].length()) ok[i] = haFetch(base, token, ent[i], i, val[i], err);
     xSemaphoreTake(haLock, portMAX_DELAY);
-    if (okIn) { haInTxt = vin; haInAt = millis(); }
-    if (okOut) { haOutTxt = vout; haOutAt = millis(); }
-    if (!ein.length()) haInAt = 0;
-    if (!eout.length()) haOutAt = 0;
+    for (int i = 0; i < HA_N; i++) {
+      if (ok[i]) { haTxt[i] = val[i]; haAt[i] = millis(); }
+      if (!ent[i].length()) haAt[i] = 0;
+    }
     haErr = err;
     xSemaphoreGive(haLock);
   }
@@ -931,10 +956,14 @@ static void fillClock(JsonObject c) {
   if (S.ha) {
     xSemaphoreTake(haLock, portMAX_DELAY);
     JsonObject h = c["ha"].to<JsonObject>();
-    h["in"] = haInAt ? haInTxt : String("--");
-    h["out"] = haOutAt ? haOutTxt : String("--");
-    h["inAge"] = haInAt ? (millis() - haInAt) / 1000 : -1;
-    h["outAge"] = haOutAt ? (millis() - haOutAt) / 1000 : -1;
+    static const char *const names[HA_N] = {"in", "out", "inHumidity", "outHumidity", "pressure"};
+    for (int i = 0; i < HA_N; i++) {
+      if (!S.haEnt[i].length()) continue;
+      JsonObject o = h[names[i]].to<JsonObject>();
+      o["entity"] = S.haEnt[i];
+      o["value"] = haAt[i] ? haTxt[i] : String("--");
+      o["age"] = haAt[i] ? (int32_t)((millis() - haAt[i]) / 1000) : -1;
+    }
     h["error"] = haErr;
     xSemaphoreGive(haLock);
   }
@@ -1039,16 +1068,22 @@ static void handleRoot() {
        "<p class=note>Now " + nowText() + ". Outside the hours the screen is dark; a tap shows the clock for 30 s.</p>"
        "<button type=button onclick=\"fetch('/api/clock?preview=30',{method:'POST'})\">Show the clock for 30 s</button>"
        "</fieldset>"
-       "<fieldset><legend>Home Assistant temperatures</legend>"
-       "<label><input type=checkbox name=ha " + String(S.ha ? "checked" : "") + "> Show inside and outside temperature on the clock</label>"
+       "<fieldset><legend>Home Assistant weather</legend>"
+       "<label><input type=checkbox name=ha " + String(S.ha ? "checked" : "") + "> Show temperature, humidity and pressure on the clock</label>"
        "<label>Home Assistant URL<input type=text name=haurl value=\"" + esc(S.haUrl) + "\"></label>"
        "<label>Long-lived access token<input type=password name=hatok placeholder='" +
        (S.haToken.length() ? "saved; type to change" : "Profile > Security > Long-lived access tokens") + "'></label>"
-       "<label>Inside sensor<input type=text name=hain placeholder=sensor.living_room_temperature value=\"" + esc(S.haIn) + "\"></label>"
-       "<label>Outside sensor<input type=text name=haout placeholder=sensor.outdoor_temperature value=\"" + esc(S.haOut) + "\"></label>";
+       "<p class=note>Sensor entity ids. Leave one empty to leave it off the clock.</p>";
+  for (int i = 0; i < HA_N; i++)
+    h += String("<label>") + HA_LABELS[i] + "<input type=text name=" + HA_KEYS[i] + " placeholder=" + HA_HINTS[i] +
+         " value=\"" + esc(S.haEnt[i]) + "\"></label>";
   if (S.ha) {
+    static const char *const units[HA_N] = {"&deg;", "&deg;", "%", "%", ""};
     xSemaphoreTake(haLock, portMAX_DELAY);
-    String st = "Inside " + (haInAt ? haInTxt : String("--")) + "&deg;, outside " + (haOutAt ? haOutTxt : String("--")) + "&deg;";
+    String st = "Now:";
+    for (int i = 0; i < HA_N; i++)
+      if (S.haEnt[i].length())
+        st += String(i ? ", " : " ") + HA_LABELS[i] + " " + (haAt[i] ? haTxt[i] + units[i] : String("--"));
     if (haErr.length()) st += ". Problem: " + esc(haErr);
     xSemaphoreGive(haLock);
     h += "<p class=note>" + st + "</p>";
@@ -1098,9 +1133,11 @@ static void handleSettings() {
     while (u.endsWith("/")) u.remove(u.length() - 1);
     if (u.length()) S.haUrl = u.substring(0, 120);
     if (web.arg("hatok").length()) { S.haToken = web.arg("hatok"); S.haToken.trim(); }
-    S.haIn = web.arg("hain"); S.haIn.trim();
-    S.haOut = web.arg("haout"); S.haOut.trim();
-    haInAt = haOutAt = 0;
+    for (int i = 0; i < HA_N; i++) {
+      S.haEnt[i] = web.arg(HA_KEYS[i]);
+      S.haEnt[i].trim();
+      haAt[i] = 0;
+    }
     haErr = "";
     xSemaphoreGive(haLock);
     haKick = true;

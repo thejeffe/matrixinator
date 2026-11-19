@@ -205,7 +205,36 @@ static const Glyph &glyph(char ch) {
     g['X'] = {5, {{0, 0, 5, 10}, {5, 0, 0, 10}}};
     g['-'] = {3.6f, {{0.2f, 5.6f, 3.4f, 5.6f}}};
     { std::vector<float> s; arc(s, 1.3f, 1.3f, 1.3f, 1.3f, 0, 360); g['*'] = {2.6f, {s}}; }   // degree sign
+    g['A'] = {5, {{0, 10, 2.5f, 0, 5, 10}, {1.1f, 6.4f, 3.9f, 6.4f}}};
+    {
+      std::vector<float> a = {0, 10, 0, 0, 2.6f, 0}, b = {0, 4.7f, 2.7f, 4.7f};
+      arc(a, 2.6f, 2.35f, 2.35f, 2.35f, 270, 450); a.insert(a.end(), {0, 4.7f});
+      arc(b, 2.7f, 7.35f, 2.65f, 2.65f, 270, 450); b.insert(b.end(), {0, 10});
+      g['B'] = {5.3f, {a, b}};
+    }
+    {
+      std::vector<float> s;
+      arc(s, 2.5f, 2.5f, 2.5f, 2.5f, 330, 180); s.insert(s.end(), {0, 7.5f});
+      arc(s, 2.5f, 7.5f, 2.5f, 2.5f, 180, 360); s.insert(s.end(), {5, 5.4f, 2.8f, 5.4f});
+      g['G'] = {5, {s}};
+    }
+    g['H'] = {5, {{0, 0, 0, 10}, {5, 0, 5, 10}, {0, 5, 5, 5}}};
+    g['M'] = {5.4f, {{0, 10, 0, 0, 2.7f, 6.2f, 5.4f, 0, 5.4f, 10}}};
+    {
+      std::vector<float> s = {0, 10, 0, 0, 2.5f, 0};
+      arc(s, 2.5f, 2.6f, 2.6f, 2.6f, 270, 450); s.insert(s.end(), {0, 5.2f});
+      g['P'] = {5.1f, {s}};
+      g['R'] = {5.1f, {s, {2.4f, 5.2f, 5.1f, 10}}};
+    }
+    {
+      std::vector<float> a, b;
+      arc(a, 1.2f, 1.8f, 1.2f, 1.8f, 0, 360);
+      arc(b, 4.8f, 8.2f, 1.2f, 1.8f, 0, 360);
+      g['%'] = {6, {{0.4f, 10, 5.6f, 0}, a, b}};
+    }
+    g['.'] = {0, {{0, 9.7f, 0, 9.7f}}};
   }
+  if (ch >= 'a' && ch <= 'z') ch -= 32;   // lower case is drawn as capitals
   return g[(unsigned char)ch & 127];
 }
 // Add a line of text, centred on (cx, cy): h = letter height in pixels, th = stroke width, gap = between letters (units).
@@ -438,19 +467,41 @@ static void markers(uint16_t *buf, int face, bool moon) {
 }
 
 // ---------- complications ----------
-static void tempWindow(uint16_t *buf, const Theme &t, float cx, float cy, const char *label, const char *val) {
+static void tempWindow(uint16_t *buf, const Theme &t, float cx, float cy, const char *label, const char *val,
+                       const char *hum) {
+  bool tall = hum[0] != 0;                     // three lines: label, temperature, humidity
   Shape win;
-  win.box(cx, cy, 39, 30, 9);
+  win.box(cx, cy, 40, tall ? 44 : 30, 9);
   fill(buf, win, t.windowEdge, 1, 1.5f);
   fill(buf, win, t.window);
   Shape lab, num;
-  text(lab, label, cx, cy - 15, 9, 1.7f, 1.8f);
+  float top = tall ? cy - 29 : cy - 15;
+  text(lab, label, cx, top, 9, 1.7f, 1.8f);
   char v[12];
   bool isNum = strcmp(val, "--") != 0 && val[0];
   snprintf(v, sizeof v, "%s%s", val[0] ? val : "--", isNum ? "*" : "");
-  text(num, v, cx + (isNum ? 3 : 0), cy + 8, 22, 3.2f, 1.9f);
+  text(num, v, cx + (isNum ? 3 : 0), top + 23, 22, 3.2f, 1.9f);
   fill(buf, lab, t.label);
   fill(buf, num, t.ink);
+  if (tall) {
+    Shape h;
+    bool hn = strcmp(hum, "--") != 0;
+    snprintf(v, sizeof v, "%s%s", hum, hn ? "%" : "");
+    text(h, v, cx, cy + 27, 13, 2.0f, 2.2f);
+    fill(buf, h, t.ink);
+  }
+}
+
+static void pressureWindow(uint16_t *buf, const Theme &t, const char *pres) {
+  const float x = CX, y = CY - 96;
+  Shape win, txt;
+  text(txt, pres, x, y, 12, 2.0f, 1.8f);
+  float hw = (txt.x1 - txt.x0) / 2 + 12;
+  if (hw < 36) hw = 36;
+  win.box(x, y, hw, 14, 7);
+  fill(buf, win, t.windowEdge, 1, 1.5f);
+  fill(buf, win, t.window);
+  fill(buf, txt, t.ink);
 }
 
 static void moonWindow(uint16_t *buf, const Theme &t, float phase) {
@@ -489,9 +540,10 @@ void renderDial(uint16_t *buf, const Dial &d) {
   background(buf, f);
   markers(buf, f, d.moon);
   if (d.temps) {
-    tempWindow(buf, t, CX - 96, CY, "IN", d.in);
-    tempWindow(buf, t, CX + 96, CY, "OUT", d.out);
+    tempWindow(buf, t, CX - 96, CY, "IN", d.in, d.inHum);
+    tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
   }
+  if (d.pres[0]) pressureWindow(buf, t, d.pres);
   if (d.moon) moonWindow(buf, t, d.moonPhase);
 }
 

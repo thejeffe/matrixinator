@@ -20,6 +20,8 @@ struct Dial {
   float moonPhase = 0;                   // 0 = new, 0.25 first quarter, 0.5 full, 0.75 last quarter
   bool temps = false;
   char in[8] = "--", out[8] = "--";      // e.g. "71", "-3" or "--"; a degree sign is added after numbers
+  char inHum[8] = "", outHum[8] = "";    // e.g. "54" (a % sign is added), "--", or "" = not shown
+  char pres[16] = "";                    // e.g. "983 HPA", "29.03 INHG", or "" = no pressure window
 };
 
 void renderDial(uint16_t *buf, const Dial &d);    // W*H RGB565, every pixel written
