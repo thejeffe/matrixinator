@@ -12,6 +12,28 @@ and pixels arrive as **DDP on UDP 4048**. Each LED is drawn as a round dot; the 
 - **Tap the screen**: shows the song Signinator is playing, the IP and the frame rate.
 - Extra endpoint: `POST /api/overlay {"title","artist"}` (Signinator sends it).
 
+## Clock
+
+**Screen mode** on the settings page:
+
+- **Auto**: Signinator's pictures; dark when it sends nothing.
+- **Auto (with clock)** (default): Signinator's pictures; when it sends nothing, an art deco analog clock during the
+  clock's hours (default 5:00 on, 22:30 off). Outside the hours the screen is dark; a tap shows the clock for 30 s.
+- **Clock only**: the clock during its hours, pictures ignored.
+
+Faces: **Gatsby** (black and gold sunburst), **Skyline** (steel, a crown of stepped triangles), **Ivory** (cream,
+black chapter ring, jade), **Midnight** (navy and silver, quiet at night). Options: second hand, moon phase,
+clock brightness, time zone (time comes from NTP).
+
+**Home Assistant temperatures**: the URL, a long-lived access token (HA: Profile > Security) and the inside and
+outside sensor entity ids. The screen reads `GET /api/states/<entity>` every minute and shows whole degrees.
+
+`GET /api/clock` gives the clock's status; `POST /api/clock?preview=30` shows it for 30 s; `POST /api/clock`
+with `{"face":1}` or `{"mode":1}` changes the face or mode.
+
+`tools/preview` draws every face to image files on a PC (the clock code is plain C++):
+`g++ -O2 -Isrc tools/preview/preview.cpp src/clock.cpp -o preview && ./preview /tmp`
+
 Display setup (pins, panel timing, ST7701 init) comes from openHASP's working configuration for this board.
 
 ## Build

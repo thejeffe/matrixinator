@@ -4,6 +4,8 @@
 // and DDP on UDP 4048 brings the pixels. Each LED is drawn as a round dot; the backlight follows the brightness.
 // Also: Improv Wi-Fi over USB (set Wi-Fi from the Lickety Split flasher), a fallback hotspot, a settings page,
 // OTA updates at POST /update (same path as WLED), and tap-to-show song / status.
+// "Auto (with clock)": when nothing is sent, an art deco analog clock (clock.cpp) during set hours, with the
+// moon phase and inside / outside temperatures from Home Assistant if wanted.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -17,7 +19,11 @@
 #include <esp32s3/rom/cache.h>
 #include <lwip/sockets.h>
 #include <JPEGDEC.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 #include "board.h"
+#include "clock.h"
 #include "panel_init.h"
 #include "improv.h"
 
@@ -35,6 +41,16 @@ struct Settings {
   bool unlit = true;        // draw unlit LEDs as dark grey dots
   bool follow = true;       // backlight follows the brightness the sender sets
   int blMax = 255, blMin = 70;
+  // clock
+  int mode = 1;             // 0 = Auto (dark when nothing's sent), 1 = Auto (with clock), 2 = Clock only
+  int face = 0;
+  bool secs = true, moon = true;
+  int clkOn = 5 * 60, clkOff = 22 * 60 + 30;   // shown from 5:00 to 22:30 (minutes after midnight)
+  int clkBri = 200;
+  String tz = "PST8PDT,M3.2.0,M11.1.0";
+  // Home Assistant temperatures
+  bool ha = false;
+  String haUrl = "http://homeassistant.local:8123", haToken, haIn, haOut;
 } S;
 static Preferences prefs;
 
@@ -50,6 +66,19 @@ static void loadSettings() {
   S.follow = prefs.getBool("follow", true);
   S.blMax = constrain(prefs.getInt("blmax", 255), 10, 255);
   S.blMin = constrain(prefs.getInt("blmin", 70), 0, 255);
+  S.mode = constrain(prefs.getInt("mode", 1), 0, 2);
+  S.face = constrain(prefs.getInt("face", 0), 0, clk::FACE_COUNT - 1);
+  S.secs = prefs.getBool("secs", true);
+  S.moon = prefs.getBool("moon", true);
+  S.clkOn = constrain(prefs.getInt("con", 5 * 60), 0, 1439);
+  S.clkOff = constrain(prefs.getInt("coff", 22 * 60 + 30), 0, 1439);
+  S.clkBri = constrain(prefs.getInt("cbri", 200), 10, 255);
+  S.tz = prefs.getString("tz", "PST8PDT,M3.2.0,M11.1.0");
+  S.ha = prefs.getBool("ha", false);
+  S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
+  S.haToken = prefs.getString("hatok", "");
+  S.haIn = prefs.getString("hain", "");
+  S.haOut = prefs.getString("haout", "");
   prefs.end();
 }
 static void saveSettings() {
@@ -64,6 +93,19 @@ static void saveSettings() {
   prefs.putBool("follow", S.follow);
   prefs.putInt("blmax", S.blMax);
   prefs.putInt("blmin", S.blMin);
+  prefs.putInt("mode", S.mode);
+  prefs.putInt("face", S.face);
+  prefs.putBool("secs", S.secs);
+  prefs.putBool("moon", S.moon);
+  prefs.putInt("con", S.clkOn);
+  prefs.putInt("coff", S.clkOff);
+  prefs.putInt("cbri", S.clkBri);
+  prefs.putString("tz", S.tz);
+  prefs.putBool("ha", S.ha);
+  prefs.putString("haurl", S.haUrl);
+  prefs.putString("hatok", S.haToken);
+  prefs.putString("hain", S.haIn);
+  prefs.putString("haout", S.haOut);
   prefs.end();
 }
 
@@ -93,6 +135,8 @@ static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts
 static bool forceRedraw = true;
 static bool idleShown = false;     // the idle screen (Matrix rain) is showing
 static bool asleep = false;        // nothing to show: backlight off until pixels/photos arrive or a tap
+static bool clockShown = false;    // the clock is on the screen
+static bool clockForce = false;    // redraw the clock now (something drew over it)
 static uint32_t idleSince = 0, peekUntil = 0;
 static const uint32_t IDLE_SLEEP_MS = 15000;
 static String npTitle, npArtist;        // the song (from Signinator), shown on a tap
@@ -135,6 +179,7 @@ static void layout() {
   if (!shown) shown = (uint8_t *)ps_calloc(n, 1);
   gfx->fillScreen(BLACK);
   forceRedraw = true;
+  clockForce = true;
 }
 
 // Draw the LEDs that changed. Returns quickly when nothing did.
@@ -200,7 +245,8 @@ static void backlight() {
   int v = 0;
   if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
-  digitalWrite(TFT_BCKL, (on && blDuty > 0 && !asleep) ? HIGH : LOW);
+  // the clock keeps its own light: Signinator's on/off is about its pictures
+  digitalWrite(TFT_BCKL, ((clockShown || (on && blDuty > 0)) && !asleep) ? HIGH : LOW);
   if (blDuty != dimFor) {
     for (int i = 0; i < 256; i++) dimLut[i] = (uint8_t)((i * blDuty + 127) / 255);
     dimFor = blDuty;
@@ -317,13 +363,17 @@ static void drawNewFrame() {
   if (readyIdx >= 0) { drawIdx = readyIdx; readyIdx = -1; idx = drawIdx; }
   xSemaphoreGive(bufLock);
   if (idx < 0) return;
-  bool wasAsleep = asleep;
-  idleSince = 0; peekUntil = 0;
-  if (idleShown || photoShown) { gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; photoShown = false; }
   lastFrameAt = millis();
   liveFrom = IPAddress(rxFrom);
-  if (on) { render(bufs[idx]); wakeAfterDraw(wasAsleep); }   // the picture first, then the light
   frames++;
+  if (!on || S.mode == 2) return;          // off, or "Clock only": not drawn
+  bool wasAsleep = asleep;
+  idleSince = 0; peekUntil = 0;
+  if (idleShown || photoShown || clockShown) {
+    gfx->fillScreen(BLACK); forceRedraw = true; idleShown = false; photoShown = false; clockShown = false;
+  }
+  render(bufs[idx]);
+  wakeAfterDraw(wasAsleep);                // the picture first, then the light
 }
 
 static bool live() { return lastFrameAt && millis() - lastFrameAt < LIVE_TIMEOUT_MS; }
@@ -387,7 +437,7 @@ static int photoDraw(JPEGDRAW *d) {
 }
 
 static void showPhoto(uint8_t *data, size_t len, int scale) {
-  if (!on || !data || !len) return;
+  if (!on || S.mode == 2 || !data || !len) return;
   if (!jpeg.openRAM(data, len, photoDraw)) return;
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
   int w = jpeg.getWidth(), h = jpeg.getHeight();
@@ -402,7 +452,7 @@ static void showPhoto(uint8_t *data, size_t len, int scale) {
   photoOy = max(0, (TFT_H - h * photoScale) / 2);
   bool wasAsleep = asleep;
   idleSince = 0; peekUntil = 0;
-  if (!photoShown || idleShown) { gfx->fillScreen(BLACK); idleShown = false; }
+  if (!photoShown || idleShown || clockShown) { gfx->fillScreen(BLACK); idleShown = false; clockShown = false; }
   jpeg.decode(0, 0, opt);
   jpeg.close();
   Cache_WriteBack_Addr((uint32_t)fb, TFT_W * TFT_H * 2);
@@ -578,7 +628,7 @@ static void updateAnimate() {           // called while the update is written: o
 // Nothing to show: dark (backlight off, black picture behind it, so waking never flashes old content).
 static void goDark() {
   gfx->fillScreen(BLACK);
-  idleShown = false; photoShown = false; forceRedraw = true;
+  idleShown = false; photoShown = false; clockShown = false; forceRedraw = true;
   idleSince = 0; peekUntil = 0;
   asleep = true;
   backlight();
@@ -632,10 +682,174 @@ static void hideOverlay() {
   overlayTop = TFT_H;
   gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK);
   forceRedraw = true;
-  if (photoShown && live()) { gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK); }   // the next photo fills it
+  if (clockShown) clockForce = true;
+  else if (photoShown && live()) { gfx->fillRect(0, TFT_H - OVERLAY_H, TFT_W, OVERLAY_H, BLACK); }   // the next photo fills it
   else if (live()) render(bufs[drawIdx]);
   else if (idleShown) { /* boot / setup screen: the rain carries on */ }
   else goDark();
+}
+
+// ---------- clock ("Auto (with clock)" / "Clock only") ----------
+// The still dial (face, numerals, moon, temperatures) is drawn once into dialBuf and again only when something on
+// it changes. Each second: copy it, add the hands, copy that to the screen at the clock's brightness.
+static uint16_t *dialBuf = nullptr, *clkBuf = nullptr;
+static String dialKey;
+static int32_t clockStamp = -1;
+static uint32_t clockPeekUntil = 0;          // a tap on the dark screen: the clock for a while, whatever the hours
+static const uint32_t CLOCK_PEEK_MS = 30000;
+
+// Home Assistant (its own task, so a slow reply never holds up the screen)
+static SemaphoreHandle_t haLock;
+static String haInTxt = "--", haOutTxt = "--", haErr;
+static uint32_t haInAt = 0, haOutAt = 0, haTriedAt = 0;
+static volatile bool haKick = true;
+static const uint32_t HA_EVERY_MS = 60000, HA_STALE_MS = 30 * 60000;
+
+static bool timeOk() { return time(nullptr) > 1700000000; }
+static void applyTz() { configTzTime(S.tz.c_str(), "pool.ntp.org", "time.google.com", "time.cloudflare.com"); }
+static String hhmm(int m) { char b[6]; snprintf(b, sizeof b, "%02d:%02d", m / 60, m % 60); return b; }
+static int parseHhmm(const String &s, int dflt) {
+  int c = s.indexOf(':');
+  if (c < 1) return dflt;
+  int h = s.substring(0, c).toInt(), m = s.substring(c + 1).toInt();
+  return (h >= 0 && h < 24 && m >= 0 && m < 60) ? h * 60 + m : dflt;
+}
+static bool inSchedule() {
+  time_t now = time(nullptr);
+  tm t;
+  localtime_r(&now, &t);
+  int m = t.tm_hour * 60 + t.tm_min;
+  if (S.clkOn == S.clkOff) return true;                                   // same time: all day
+  return S.clkOn < S.clkOff ? (m >= S.clkOn && m < S.clkOff) : (m >= S.clkOn || m < S.clkOff);
+}
+static bool clockWanted() {
+  if (S.mode == 0 || !timeOk()) return false;
+  if (clockPeekUntil) return true;
+  return inSchedule();
+}
+
+static void clockTick() {
+  if (!dialBuf || !clkBuf) return;
+  time_t now = time(nullptr);
+  tm t;
+  localtime_r(&now, &t);
+  clk::Dial d;
+  d.face = S.face;
+  d.moon = S.moon;
+  int moonStep = (int)(clk::moonPhase(now) * 118);                 // the moon is redrawn about every 6 hours
+  d.moonPhase = (moonStep + 0.5f) / 118;
+  d.temps = S.ha;
+  if (S.ha) {
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    uint32_t ms = millis();
+    String in = haInAt && ms - haInAt < HA_STALE_MS ? haInTxt : String("--");
+    String out = haOutAt && ms - haOutAt < HA_STALE_MS ? haOutTxt : String("--");
+    xSemaphoreGive(haLock);
+    strlcpy(d.in, in.c_str(), sizeof d.in);
+    strlcpy(d.out, out.c_str(), sizeof d.out);
+  }
+  String key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out;
+  if (key != dialKey) {
+    clk::renderDial(dialBuf, d);
+    dialKey = key;
+    clockForce = true;
+  }
+  int32_t stamp = (t.tm_hour * 60 + t.tm_min) * 60 + (S.secs ? t.tm_sec : 0);
+  if (stamp == clockStamp && !clockForce) return;
+  clockStamp = stamp;
+  clockForce = false;
+  memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
+  clk::drawHands(clkBuf, S.face, t.tm_hour + t.tm_min / 60.0f + t.tm_sec / 3600.0f, t.tm_min + t.tm_sec / 60.0f,
+                 t.tm_sec, S.secs);
+  // to the screen at the clock's brightness, leaving the tap overlay alone
+  static uint8_t d5[32], d6[64];
+  static int dimAt = -1;
+  if (dimAt != S.clkBri) {
+    for (int i = 0; i < 32; i++) d5[i] = (i * S.clkBri + 127) / 255;
+    for (int i = 0; i < 64; i++) d6[i] = (i * S.clkBri + 127) / 255;
+    dimAt = S.clkBri;
+  }
+  int rows = min(overlayTop, TFT_H);
+  size_t n = (size_t)rows * TFT_W;
+  if (S.clkBri >= 255) memcpy(fb, clkBuf, n * 2);
+  else
+    for (size_t i = 0; i < n; i++) {
+      uint16_t c = clkBuf[i];
+      fb[i] = (d5[c >> 11] << 11) | (d6[(c >> 5) & 63] << 5) | d5[c & 31];
+    }
+  Cache_WriteBack_Addr((uint32_t)fb, n * 2);
+}
+
+static void startClock() {
+  idleShown = false; photoShown = false;
+  idleSince = 0; peekUntil = 0;
+  clockShown = true;
+  clockForce = true;
+  clockTick();                          // the clock first, then the light
+  asleep = false;
+  backlight();
+}
+
+// One sensor's state from Home Assistant's REST API, rounded to a whole number ("--" if it isn't a number).
+static bool haFetch(const String &base, const String &token, const String &entity, String &val, String &err) {
+  WiFiClient plain;                 // the connections first: HTTPClient's destructor still uses its client
+  WiFiClientSecure tls;
+  HTTPClient http;
+  String u = base + "/api/states/" + entity;
+  bool begun;
+  if (u.startsWith("https://")) { tls.setInsecure(); begun = http.begin(tls, u); }
+  else begun = http.begin(plain, u);
+  if (!begun) { err = "bad Home Assistant URL"; return false; }
+  http.setConnectTimeout(3000);
+  http.setTimeout(4000);
+  http.addHeader("Authorization", "Bearer " + token);
+  int code = http.GET();
+  if (code != 200) {
+    err = entity + ": " + (code == 401 ? String("token refused (401)") : code == 404 ? String("no such entity (404)")
+                                         : code < 0 ? String("can't reach Home Assistant") : "HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  String body = http.getString();
+  http.end();
+  JsonDocument filter;
+  filter["state"] = true;
+  JsonDocument doc;
+  if (deserializeJson(doc, body, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
+    err = entity + ": unreadable reply";
+    return false;
+  }
+  const char *st = doc["state"] | "";
+  char *end = nullptr;
+  float v = strtof(st, &end);
+  if (!st[0] || end == st) { err = entity + " is " + (st[0] ? st : "empty"); val = "--"; return true; }
+  val = String((int)lroundf(v));
+  return true;
+}
+
+static void haTask(void *) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    if (!S.ha || WiFi.status() != WL_CONNECTED || updating) continue;
+    if (!haKick && millis() - haTriedAt < HA_EVERY_MS) continue;
+    haKick = false;
+    haTriedAt = millis();
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    String base = S.haUrl, token = S.haToken, ein = S.haIn, eout = S.haOut;
+    xSemaphoreGive(haLock);
+    String err, vin, vout;
+    if (!token.length()) err = "no access token";
+    bool okIn = false, okOut = false;
+    if (token.length() && ein.length()) okIn = haFetch(base, token, ein, vin, err);
+    if (token.length() && eout.length()) okOut = haFetch(base, token, eout, vout, err);
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    if (okIn) { haInTxt = vin; haInAt = millis(); }
+    if (okOut) { haOutTxt = vout; haOutAt = millis(); }
+    if (!ein.length()) haInAt = 0;
+    if (!eout.length()) haOutAt = 0;
+    haErr = err;
+    xSemaphoreGive(haLock);
+  }
 }
 
 // ---------- touch (GT911) ----------
@@ -677,6 +891,55 @@ static void sendJson(JsonDocument &d, int code = 200) {
   web.send(code, "application/json", out);
 }
 
+static const char *const MODES[3] = {"Auto", "Auto (with clock)", "Clock only"};
+static const char *const TZS[][2] = {
+    {"Pacific (Los Angeles)", "PST8PDT,M3.2.0,M11.1.0"}, {"Mountain (Denver)", "MST7MDT,M3.2.0,M11.1.0"},
+    {"Arizona", "MST7"}, {"Central (Chicago)", "CST6CDT,M3.2.0,M11.1.0"},
+    {"Eastern (New York)", "EST5EDT,M3.2.0,M11.1.0"}, {"Alaska", "AKST9AKDT,M3.2.0,M11.1.0"},
+    {"Hawaii", "HST10"}, {"UK (London)", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Central Europe", "CET-1CEST,M3.5.0,M10.5.0/3"}, {"UTC", "UTC0"}};
+
+static String nowText() {
+  if (!timeOk()) return "not set yet (waiting for internet time)";
+  time_t now = time(nullptr);
+  tm t;
+  localtime_r(&now, &t);
+  static const char *days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  char b[32];
+  snprintf(b, sizeof b, "%s %d:%02d %s", days[t.tm_wday % 7], (t.tm_hour + 11) % 12 + 1, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+  return b;
+}
+
+static void fillClock(JsonObject c) {
+  c["mode"] = MODES[S.mode];
+  c["face"] = clk::faceName(S.face);
+  c["faceIndex"] = S.face;
+  c["showing"] = clockShown;
+  c["time"] = nowText();
+  c["timeSet"] = timeOk();
+  c["on"] = hhmm(S.clkOn);
+  c["off"] = hhmm(S.clkOff);
+  c["inHours"] = timeOk() && inSchedule();
+  c["seconds"] = S.secs;
+  c["bri"] = S.clkBri;
+  c["tz"] = S.tz;
+  if (S.moon) {
+    float p = clk::moonPhase(time(nullptr));
+    c["moon"] = clk::moonName(p);
+    c["moonPhase"] = roundf(p * 1000) / 1000;
+  }
+  if (S.ha) {
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    JsonObject h = c["ha"].to<JsonObject>();
+    h["in"] = haInAt ? haInTxt : String("--");
+    h["out"] = haOutAt ? haOutTxt : String("--");
+    h["inAge"] = haInAt ? (millis() - haInAt) / 1000 : -1;
+    h["outAge"] = haOutAt ? (millis() - haOutAt) / 1000 : -1;
+    h["error"] = haErr;
+    xSemaphoreGive(haLock);
+  }
+}
+
 static void fillInfo(JsonObject i) {
   i["ver"] = String("0.16.0-matrixinator-") + VERSION;   // looks like a WLED version to tools that parse it
   i["vid"] = 2611090;
@@ -703,6 +966,8 @@ static void fillInfo(JsonObject i) {
   dg["badFrames"] = rxBad;                       // incomplete or wrong-size frames that were skipped
   dg["photo"] = photoShown;
   i["photoPort"] = PHOTO_PORT;                  // Signinator streams photos here
+  JsonObject ck = i["clock"].to<JsonObject>();
+  fillClock(ck);
   JsonObject mx = i["mx"].to<JsonObject>();     // what's shown right now (Signinator's "full resolution" look)
   mx["w"] = curW;
   mx["h"] = curH;
@@ -744,9 +1009,51 @@ static void handleRoot() {
        "<label><input type=checkbox name=unlit " + (S.unlit ? "checked" : "") + "> Show unlit LEDs as dark dots</label>"
        "<p class=note>Set the same size as the LED sign. Signinator reads it from /json/info like it does from WLED.</p></fieldset>"
        "<fieldset><legend>Brightness</legend>"
-       "<label><input type=checkbox name=follow " + (S.follow ? "checked" : "") + "> Follow the brightness Signinator sends</label>"
+       "<label><input type=checkbox name=follow " + String(S.follow ? "checked" : "") + "> Follow the brightness Signinator sends</label>"
        "<label>Brightest (10-255)<input type=number min=10 max=255 name=blmax value=" + String(S.blMax) + "></label>"
        "<label>Dimmest (0-255)<input type=number min=0 max=255 name=blmin value=" + String(S.blMin) + "></label></fieldset>"
+       "<fieldset><legend>Clock</legend>"
+       "<label>Screen mode<select name=mode>";
+  for (int m = 0; m < 3; m++)
+    h += "<option value=" + String(m) + (S.mode == m ? " selected>" : ">") + MODES[m] + "</option>";
+  h += "</select></label><p class=note>Auto: dark when Signinator sends nothing. Auto (with clock): the clock "
+       "instead, during the hours below. Clock only: always the clock in those hours, pictures ignored.</p>"
+       "<label>Face<select name=face>";
+  for (int f = 0; f < clk::FACE_COUNT; f++)
+    h += "<option value=" + String(f) + (S.face == f ? " selected>" : ">") + clk::faceName(f) + "</option>";
+  h += "</select></label>"
+       "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
+       "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
+       "<label>Clock on at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
+       "<label>Clock off at<input type=time name=coff value=" + hhmm(S.clkOff) + "></label>"
+       "<label>Time zone<select name=tz>";
+  bool tzKnown = false;
+  for (auto &z : TZS) {
+    bool sel = S.tz == z[1];
+    tzKnown |= sel;
+    h += "<option value=\"" + String(z[1]) + "\"" + (sel ? " selected>" : ">") + z[0] + "</option>";
+  }
+  if (!tzKnown) h += "<option value=\"" + esc(S.tz) + "\" selected>" + esc(S.tz) + "</option>";
+  h += "</select></label>"
+       "<label>Clock brightness (10-255)<input type=number min=10 max=255 name=cbri value=" + String(S.clkBri) + "></label>"
+       "<p class=note>Now " + nowText() + ". Outside the hours the screen is dark; a tap shows the clock for 30 s.</p>"
+       "<button type=button onclick=\"fetch('/api/clock?preview=30',{method:'POST'})\">Show the clock for 30 s</button>"
+       "</fieldset>"
+       "<fieldset><legend>Home Assistant temperatures</legend>"
+       "<label><input type=checkbox name=ha " + String(S.ha ? "checked" : "") + "> Show inside and outside temperature on the clock</label>"
+       "<label>Home Assistant URL<input type=text name=haurl value=\"" + esc(S.haUrl) + "\"></label>"
+       "<label>Long-lived access token<input type=password name=hatok placeholder='" +
+       (S.haToken.length() ? "saved; type to change" : "Profile > Security > Long-lived access tokens") + "'></label>"
+       "<label>Inside sensor<input type=text name=hain placeholder=sensor.living_room_temperature value=\"" + esc(S.haIn) + "\"></label>"
+       "<label>Outside sensor<input type=text name=haout placeholder=sensor.outdoor_temperature value=\"" + esc(S.haOut) + "\"></label>";
+  if (S.ha) {
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    String st = "Inside " + (haInAt ? haInTxt : String("--")) + "&deg;, outside " + (haOutAt ? haOutTxt : String("--")) + "&deg;";
+    if (haErr.length()) st += ". Problem: " + esc(haErr);
+    xSemaphoreGive(haLock);
+    h += "<p class=note>" + st + "</p>";
+  }
+  h += "</fieldset>"
        "<fieldset><legend>Wi-Fi</legend>"
        "<label>Network<input type=text name=ssid value=\"" + esc(S.ssid) + "\"></label>"
        "<label>Password<input type=password name=pass placeholder='" + (S.pass.length() ? "saved; type to change" : "") + "'></label>"
@@ -773,7 +1080,35 @@ static void handleSettings() {
   if (web.hasArg("ssid") && web.arg("ssid") != S.ssid) { S.ssid = web.arg("ssid"); wifiChanged = true; }
   if (web.hasArg("pass") && web.arg("pass").length()) { S.pass = web.arg("pass"); wifiChanged = true; }
   if (web.hasArg("host") && web.arg("host").length()) S.host = web.arg("host").substring(0, 32);
+  // clock (only when the form has the clock fields, so an older form can't switch things off)
+  bool tzChanged = false;
+  if (web.hasArg("mode")) {
+    S.mode = constrain(web.arg("mode").toInt(), 0, 2);
+    S.face = constrain(web.arg("face").toInt(), 0, clk::FACE_COUNT - 1);
+    S.secs = web.hasArg("secs");
+    S.moon = web.hasArg("moon");
+    S.clkOn = parseHhmm(web.arg("con"), S.clkOn);
+    S.clkOff = parseHhmm(web.arg("coff"), S.clkOff);
+    if (web.hasArg("cbri")) S.clkBri = constrain(web.arg("cbri").toInt(), 10, 255);
+    if (web.hasArg("tz") && web.arg("tz").length() && web.arg("tz") != S.tz) { S.tz = web.arg("tz").substring(0, 60); tzChanged = true; }
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    S.ha = web.hasArg("ha");
+    String u = web.arg("haurl");
+    u.trim();
+    while (u.endsWith("/")) u.remove(u.length() - 1);
+    if (u.length()) S.haUrl = u.substring(0, 120);
+    if (web.arg("hatok").length()) { S.haToken = web.arg("hatok"); S.haToken.trim(); }
+    S.haIn = web.arg("hain"); S.haIn.trim();
+    S.haOut = web.arg("haout"); S.haOut.trim();
+    haInAt = haOutAt = 0;
+    haErr = "";
+    xSemaphoreGive(haLock);
+    haKick = true;
+    clockForce = true;
+    dialKey = "";
+  }
   saveSettings();
+  if (tzChanged) applyTz();
   backlight();
   web.sendHeader("Location", "/");
   web.send(303);
@@ -796,6 +1131,7 @@ static void handleUpdateUpload() {
   if (u.status == UPLOAD_FILE_START) {
     updating = true;                         // from here on: taps, pixels, photos and settings are ignored
     overlayUntil = 0; overlayTop = TFT_H;
+    clockShown = false;
     upTotal = web.clientContentLength() > 0 ? web.clientContentLength() : 0;
     upDone = 0;
     digitalWrite(TFT_BCKL, HIGH);
@@ -833,8 +1169,8 @@ static void handleState() {
       else if (in["on"].is<const char *>() && String(in["on"].as<const char *>()) == "t") on = !on;
       if (in["bri"].is<int>()) bri = constrain(in["bri"].as<int>(), 0, 255);
       backlight();
-      if (!on) { gfx->fillScreen(BLACK); idleShown = false; forceRedraw = true; }
-      else if (!live() && !idleShown) goDark();
+      if (!on) { if (!clockShown) gfx->fillScreen(BLACK); idleShown = false; forceRedraw = true; }
+      else if (!live() && !idleShown && !clockShown) goDark();
     }
   }
   JsonDocument d;
@@ -893,7 +1229,7 @@ static void setupWeb() {
     bool px = String(in["look"] | "dots") == "pixels";
     if (px) setLook(in["w"] | 120, in["h"] | 120, String(in["shape"] | "squares") == "squares", true);
     else setLook(S.w, S.h, false, false);
-    if (!live() && !idleShown) goDark();
+    if (!live() && !idleShown && !clockShown) goDark();
     web.send(200, "application/json", "{\"ok\":true}");
   });
   web.on("/api/photo", HTTP_POST, [] {
@@ -914,6 +1250,27 @@ static void setupWeb() {
     } else if (u.status == UPLOAD_FILE_ABORTED) {
       photoOk = false;
     }
+  });
+  // GET: the clock's status. POST ?preview=30 (or JSON {"preview":30,"face":1,"mode":1}): show it now, change the
+  // face or mode (face and mode are saved).
+  web.on("/api/clock", [] {
+    if (web.method() == HTTP_POST) {
+      if (updating) { web.send(503, "text/plain", "Updating firmware"); return; }
+      JsonDocument in;
+      deserializeJson(in, web.arg("plain"));
+      int pv = web.hasArg("preview") ? web.arg("preview").toInt() : (in["preview"] | 0);
+      bool save = false;
+      if (in["face"].is<int>()) { S.face = constrain(in["face"].as<int>(), 0, clk::FACE_COUNT - 1); save = true; }
+      if (in["mode"].is<int>()) { S.mode = constrain(in["mode"].as<int>(), 0, 2); save = true; }
+      if (save) { saveSettings(); clockForce = true; }
+      if (pv > 0) {
+        if (!S.mode) { S.mode = 1; saveSettings(); }   // a preview needs a clock mode
+        clockPeekUntil = millis() + (uint32_t)constrain(pv, 1, 3600) * 1000;
+      }
+    }
+    JsonDocument d;
+    fillClock(d.to<JsonObject>());
+    sendJson(d);
   });
   web.on("/api/restart", HTTP_POST, [] {
     web.send(200, "application/json", "{\"ok\":true}");
@@ -951,6 +1308,9 @@ void setup() {
   gfxOk = gfx->begin(GFX_NOT_DEFINED);
   fb = gfx->getFramebuffer();
   bufLock = xSemaphoreCreateMutex();
+  haLock = xSemaphoreCreateMutex();
+  dialBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+  clkBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
   layout();
@@ -983,6 +1343,8 @@ void setup() {
   streamBuf = (uint8_t *)ps_malloc(PHOTO_MAX);
   streamDrawn = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(photoTask, "photo", 6144, nullptr, 4, nullptr, 0);
+  xTaskCreatePinnedToCore(haTask, "ha", 10240, nullptr, 1, nullptr, 0);
+  applyTz();                          // internet time (keeps trying in the background)
   setupWeb();
   showIdle();
 }
@@ -1007,7 +1369,21 @@ void loop() {
     else if (now - wifiLostAt > 30000 && !apOn) { startAp(); if (!live()) { bool w = asleep; showIdle(); wakeAfterDraw(w); } }
   }
 
-  if (on && !live() && lastFrameAt && !idleShown && !asleep && !overlayUntil) goDark();   // stream stopped: dark
+  // The clock: when nothing is being shown (or always, in "Clock only") during its hours, or after a tap.
+  if (clockPeekUntil && (int32_t)(now - clockPeekUntil) >= 0) clockPeekUntil = 0;
+  {
+    bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
+    bool picture = live() && on && S.mode != 2;
+    if (!settingUp && !picture && clockWanted()) {
+      if (!clockShown) startClock();
+      else clockTick();
+    } else if (clockShown) {
+      clockShown = false;
+      if (!picture) goDark();
+    }
+  }
+
+  if (on && !live() && lastFrameAt && !idleShown && !asleep && !overlayUntil && !clockShown) goDark();   // stream stopped: dark
   if (idleShown && on && !overlayUntil && !asleep) {          // the rain keeps falling; panel follows Wi-Fi
     mrStep();
     static uint32_t panelAt = 0;
@@ -1026,10 +1402,12 @@ void loop() {
     int t = touched();
     if (t == 1 && !wasDown && now - upAt > 250) {
       if (asleep) {                                        // dark: the info strip (song, IP) on black
+        if (S.mode && timeOk()) clockPeekUntil = now + CLOCK_PEEK_MS;   // and the clock for a while
         gfx->fillScreen(BLACK); asleep = false; backlight(); showOverlay();
       } else {
-        if (on) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
-        if (overlayUntil) hideOverlay(); else if (on) showOverlay();
+        bool lit = on || clockShown;
+        if (lit) { digitalWrite(TFT_BCKL, LOW); delayMicroseconds(200); digitalWrite(TFT_BCKL, HIGH); }   // a tap re-arms the light too
+        if (overlayUntil) hideOverlay(); else if (lit) showOverlay();
       }
     }
     if (t == 0 && wasDown) upAt = now;
@@ -1040,7 +1418,7 @@ void loop() {
   // The backlight driver sometimes shuts itself off (the picture keeps changing in the dark) and stays off
   // until its enable pin is switched off and on. Re-arm it every 30 s with a 0.2 ms blip (too short to see).
   static uint32_t rearmAt = 0;
-  if (on && blDuty > 0 && !asleep && now - rearmAt >= 30000) {
+  if ((clockShown || (on && blDuty > 0)) && !asleep && now - rearmAt >= 30000) {
     rearmAt = now;
     digitalWrite(TFT_BCKL, LOW);
     delayMicroseconds(200);
