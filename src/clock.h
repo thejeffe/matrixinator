@@ -29,6 +29,12 @@ struct Dial {
 };
 
 void renderDial(uint16_t *buf, const Dial &d);    // W*H RGB565, every pixel written
+// The same in two steps, so the slow part can be kept: renderBase() draws what never changes for a face
+// (background, numerals; every pixel written); renderExtras() adds the windows (temperatures, moon, pressure,
+// countdown) on a copy of it. baseKey() tells when a kept base no longer fits the dial.
+void renderBase(uint16_t *buf, const Dial &d);
+void renderExtras(uint16_t *buf, const Dial &d);
+void baseKey(const Dial &d, char *out, int n);
 // Hands every second (the Advent face shows the time as digits instead).
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 

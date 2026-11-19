@@ -1,5 +1,7 @@
 // Art deco clock faces. Everything is drawn with signed distances, so edges are smooth (anti-aliased) and a shape
 // made of several parts (a hand, a numeral) is blended once, with no seams where the parts overlap.
+// Arduino builds for size (-Os); this file is all arithmetic, so it gets full speed.
+#pragma GCC optimize("O2", "fast-math")
 #include "clock.h"
 #include <math.h>
 #include <stdio.h>
@@ -1057,12 +1059,25 @@ static void moonWindow(uint16_t *buf, const Theme &t, float phase) {
     }
 }
 
+void baseKey(const Dial &d, char *out, int n) {
+  int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
+  if (f == 7) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, d.daysToXmas);   // Advent: changes daily
+  else snprintf(out, n, "%d|%d", f, f == 3 ? (int)d.moon : 0);                   // Midnight's VI moves for the moon
+}
+void renderBase(uint16_t *buf, const Dial &d) {
+  int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
+  background(buf, f);
+  if (f == 7) advent(buf, d);                   // the Advent calendar fills the screen: no windows
+  else markers(buf, f, d.moon);
+}
 void renderDial(uint16_t *buf, const Dial &d) {
+  renderBase(buf, d);
+  renderExtras(buf, d);
+}
+void renderExtras(uint16_t *buf, const Dial &d) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
   const Theme &t = THEMES[f];
-  background(buf, f);
-  if (f == 7) { advent(buf, d); return; }       // the Advent calendar fills the screen: no windows
-  markers(buf, f, d.moon);
+  if (f == 7) return;
   if (d.temps) {
     tempWindow(buf, t, CX - 96, CY, "IN", d.in, d.inHum);
     tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
