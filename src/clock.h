@@ -10,9 +10,9 @@
 namespace clk {
 
 static const int W = 480, H = 480;
-static const int FACE_COUNT = 4;
+static const int FACE_COUNT = 9;
 
-const char *faceName(int face);          // "Gatsby", "Skyline", "Ivory", "Midnight"
+const char *faceName(int face);          // Gatsby, Skyline, Ivory, Midnight, Pup, Grandfather, Christmas, Advent, Lit Up
 
 struct Dial {
   int face = 0;
@@ -22,9 +22,12 @@ struct Dial {
   char in[8] = "--", out[8] = "--";      // e.g. "71", "-3" or "--"; a degree sign is added after numbers
   char inHum[8] = "", outHum[8] = "";    // e.g. "54" (a % sign is added), "--", or "" = not shown
   char pres[16] = "";                    // e.g. "983 HPA", "29.03 INHG", or "" = no pressure window
+  int month = 0, mday = 0;               // today (1-12, 1-31): the Advent calendar opens its doors by it
+  int daysToXmas = -1;                   // 0 on Christmas Day; the Christmas and Advent faces count down
 };
 
 void renderDial(uint16_t *buf, const Dial &d);    // W*H RGB565, every pixel written
+// Hands every second (the Advent face shows the time as digits instead).
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 
 float moonPhase(time_t utc);             // 0..1

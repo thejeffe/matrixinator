@@ -47,6 +47,8 @@ struct Settings {
   bool secs = true, moon = true;
   int clkOn = 5 * 60, clkOff = 22 * 60 + 30;   // shown from 5:00 to 22:30 (minutes after midnight)
   int clkBri = 200;
+  int night = 0;            // outside the clock's hours: 0 = screen off, 1 = the clock, dimmed
+  int nightBri = 40;
   String tz = "PST8PDT,M3.2.0,M11.1.0";
   // Home Assistant temperatures
   bool ha = false;
@@ -82,6 +84,8 @@ static void loadSettings() {
   S.clkOn = constrain(prefs.getInt("con", 5 * 60), 0, 1439);
   S.clkOff = constrain(prefs.getInt("coff", 22 * 60 + 30), 0, 1439);
   S.clkBri = constrain(prefs.getInt("cbri", 200), 10, 255);
+  S.night = constrain(prefs.getInt("night", 0), 0, 1);
+  S.nightBri = constrain(prefs.getInt("nbri", 40), 5, 255);
   S.tz = prefs.getString("tz", "PST8PDT,M3.2.0,M11.1.0");
   S.ha = prefs.getBool("ha", false);
   S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
@@ -108,6 +112,8 @@ static void saveSettings() {
   prefs.putInt("con", S.clkOn);
   prefs.putInt("coff", S.clkOff);
   prefs.putInt("cbri", S.clkBri);
+  prefs.putInt("night", S.night);
+  prefs.putInt("nbri", S.nightBri);
   prefs.putString("tz", S.tz);
   prefs.putBool("ha", S.ha);
   prefs.putString("haurl", S.haUrl);
@@ -731,8 +737,19 @@ static bool inSchedule() {
 }
 static bool clockWanted() {
   if (S.mode == 0 || !timeOk()) return false;
-  if (clockPeekUntil) return true;
+  if (clockPeekUntil || S.night == 1) return true;   // night "Dim": the clock stays, darker
   return inSchedule();
+}
+// Daytime brightness, or the night one outside the hours (a tap shows it at daytime brightness).
+static int clockBri() { return (clockPeekUntil || inSchedule()) ? S.clkBri : S.nightBri; }
+
+// Whole days from today to the next Christmas Day (0 on the day).
+static int daysToChristmas(const tm &now) {
+  tm a = {}, b = {};
+  a.tm_year = now.tm_year; a.tm_mon = now.tm_mon; a.tm_mday = now.tm_mday; a.tm_hour = 12;
+  b.tm_year = now.tm_year + ((now.tm_mon == 11 && now.tm_mday > 25) ? 1 : 0); b.tm_mon = 11; b.tm_mday = 25; b.tm_hour = 12;
+  a.tm_isdst = b.tm_isdst = -1;
+  return (int)lround(difftime(mktime(&b), mktime(&a)) / 86400.0);
 }
 
 static void clockTick() {
@@ -746,6 +763,9 @@ static void clockTick() {
   int moonStep = (int)(clk::moonPhase(now) * 118);                 // the moon is redrawn about every 6 hours
   d.moonPhase = (moonStep + 0.5f) / 118;
   d.temps = S.ha;
+  d.month = t.tm_mon + 1;
+  d.mday = t.tm_mday;
+  d.daysToXmas = daysToChristmas(t);
   if (S.ha) {
     xSemaphoreTake(haLock, portMAX_DELAY);
     uint32_t ms = millis();
@@ -762,30 +782,35 @@ static void clockTick() {
     if (!d.outHum[0] && d.inHum[0]) strlcpy(d.outHum, "--", sizeof d.outHum);
   }
   String key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out + "|" +
-               d.inHum + "|" + d.outHum + "|" + d.pres;
+               d.inHum + "|" + d.outHum + "|" + d.pres + "|" + d.month + "/" + d.mday;
   if (key != dialKey) {
     clk::renderDial(dialBuf, d);
     dialKey = key;
     clockForce = true;
   }
-  int32_t stamp = (t.tm_hour * 60 + t.tm_min) * 60 + (S.secs ? t.tm_sec : 0);
+  const bool lights = S.face == 8;                               // Lit Up: the bulbs step every second
+  const bool secs = (S.secs || lights) && S.face != 7;            // Advent shows minutes only
+  int bri = clockBri();
+  static int briShown = -1;
+  if (bri != briShown) { briShown = bri; clockForce = true; }
+  int32_t stamp = (t.tm_hour * 60 + t.tm_min) * 60 + (secs ? t.tm_sec : 0);
   if (stamp == clockStamp && !clockForce) return;
   clockStamp = stamp;
   clockForce = false;
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
   clk::drawHands(clkBuf, S.face, t.tm_hour + t.tm_min / 60.0f + t.tm_sec / 3600.0f, t.tm_min + t.tm_sec / 60.0f,
-                 t.tm_sec, S.secs);
+                 t.tm_sec, S.secs && S.face != 7);
   // to the screen at the clock's brightness, leaving the tap overlay alone
   static uint8_t d5[32], d6[64];
   static int dimAt = -1;
-  if (dimAt != S.clkBri) {
-    for (int i = 0; i < 32; i++) d5[i] = (i * S.clkBri + 127) / 255;
-    for (int i = 0; i < 64; i++) d6[i] = (i * S.clkBri + 127) / 255;
-    dimAt = S.clkBri;
+  if (dimAt != bri) {
+    for (int i = 0; i < 32; i++) d5[i] = (i * bri + 127) / 255;
+    for (int i = 0; i < 64; i++) d6[i] = (i * bri + 127) / 255;
+    dimAt = bri;
   }
   int rows = min(overlayTop, TFT_H);
   size_t n = (size_t)rows * TFT_W;
-  if (S.clkBri >= 255) memcpy(fb, clkBuf, n * 2);
+  if (bri >= 255) memcpy(fb, clkBuf, n * 2);
   else
     for (size_t i = 0; i < n; i++) {
       uint16_t c = clkBuf[i];
@@ -947,6 +972,8 @@ static void fillClock(JsonObject c) {
   c["inHours"] = timeOk() && inSchedule();
   c["seconds"] = S.secs;
   c["bri"] = S.clkBri;
+  c["night"] = S.night ? "dim" : "off";
+  c["nightBri"] = S.nightBri;
   c["tz"] = S.tz;
   if (S.moon) {
     float p = clk::moonPhase(time(nullptr));
@@ -1053,8 +1080,8 @@ static void handleRoot() {
   h += "</select></label>"
        "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
        "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
-       "<label>Clock on at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
-       "<label>Clock off at<input type=time name=coff value=" + hhmm(S.clkOff) + "></label>"
+       "<label>Day starts at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
+       "<label>Night starts at<input type=time name=coff value=" + hhmm(S.clkOff) + "></label>"
        "<label>Time zone<select name=tz>";
   bool tzKnown = false;
   for (auto &z : TZS) {
@@ -1065,7 +1092,11 @@ static void handleRoot() {
   if (!tzKnown) h += "<option value=\"" + esc(S.tz) + "\" selected>" + esc(S.tz) + "</option>";
   h += "</select></label>"
        "<label>Clock brightness (10-255)<input type=number min=10 max=255 name=cbri value=" + String(S.clkBri) + "></label>"
-       "<p class=note>Now " + nowText() + ". Outside the hours the screen is dark; a tap shows the clock for 30 s.</p>"
+       "<label>At night<select name=night><option value=0" + (S.night == 0 ? " selected" : "") + ">Screen off</option>"
+       "<option value=1" + (S.night == 1 ? " selected" : "") + ">Clock, dimmed</option></select></label>"
+       "<label>Night brightness (5-255)<input type=number min=5 max=255 name=nbri value=" + String(S.nightBri) + "></label>"
+       "<p class=note>Now " + nowText() + ". With the screen off at night, a tap shows the clock for 30 s. "
+       "The backlight can't dim on this board, so a dimmed clock still has a faint glow behind black.</p>"
        "<button type=button onclick=\"fetch('/api/clock?preview=30',{method:'POST'})\">Show the clock for 30 s</button>"
        "</fieldset>"
        "<fieldset><legend>Home Assistant weather</legend>"
@@ -1125,6 +1156,8 @@ static void handleSettings() {
     S.clkOn = parseHhmm(web.arg("con"), S.clkOn);
     S.clkOff = parseHhmm(web.arg("coff"), S.clkOff);
     if (web.hasArg("cbri")) S.clkBri = constrain(web.arg("cbri").toInt(), 10, 255);
+    if (web.hasArg("night")) S.night = constrain(web.arg("night").toInt(), 0, 1);
+    if (web.hasArg("nbri")) S.nightBri = constrain(web.arg("nbri").toInt(), 5, 255);
     if (web.hasArg("tz") && web.arg("tz").length() && web.arg("tz") != S.tz) { S.tz = web.arg("tz").substring(0, 60); tzChanged = true; }
     xSemaphoreTake(haLock, portMAX_DELAY);
     S.ha = web.hasArg("ha");

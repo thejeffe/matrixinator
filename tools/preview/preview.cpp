@@ -22,7 +22,7 @@ static void writePPM(const char *path, const uint16_t *b) {
 int main(int argc, char **argv) {
   const char *dir = argc > 1 ? argv[1] : ".";
   std::vector<uint16_t> dial(clk::W * clk::H), out(clk::W * clk::H);
-  const float phases[clk::FACE_COUNT] = {0.18f, 0.5f, 0.62f, 0.85f};
+  const float phases[clk::FACE_COUNT] = {0.18f, 0.5f, 0.62f, 0.85f, 0.3f, 0.5f, 0.1f, 0.7f, 0.45f};
   for (int f = 0; f < clk::FACE_COUNT; f++) {
     for (int v = 0; v < 2; v++) {               // with and without the extras
       clk::Dial d;
@@ -32,6 +32,8 @@ int main(int argc, char **argv) {
       d.temps = v == 0;
       strcpy(d.in, "71");
       strcpy(d.out, f == 3 ? "-4" : "48");
+      d.month = 12; d.mday = 9; d.daysToXmas = 16;
+      if (v == 1 && f == 7) { d.month = 11; d.mday = 18; d.daysToXmas = 37; }
       if (v == 0) { strcpy(d.inHum, "55"); strcpy(d.outHum, "74"); strcpy(d.pres, f == 1 ? "29.03 INHG" : "983 HPA"); }
       auto t0 = std::chrono::steady_clock::now();
       clk::renderDial(dial.data(), d);

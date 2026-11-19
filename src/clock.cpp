@@ -215,7 +215,7 @@ static const Glyph &glyph(char ch) {
     {
       std::vector<float> s;
       arc(s, 2.5f, 2.5f, 2.5f, 2.5f, 330, 180); s.insert(s.end(), {0, 7.5f});
-      arc(s, 2.5f, 7.5f, 2.5f, 2.5f, 180, 360); s.insert(s.end(), {5, 5.4f, 2.8f, 5.4f});
+      arc(s, 2.5f, 7.5f, 2.5f, 2.5f, 180, 0); s.insert(s.end(), {5, 5.4f, 2.8f, 5.4f});
       g['G'] = {5, {s}};
     }
     g['H'] = {5, {{0, 0, 0, 10}, {5, 0, 5, 10}, {0, 5, 5, 5}}};
@@ -233,23 +233,73 @@ static const Glyph &glyph(char ch) {
       g['%'] = {6, {{0.4f, 10, 5.6f, 0}, a, b}};
     }
     g['.'] = {0, {{0, 9.7f, 0, 9.7f}}};
+    g[':'] = {0, {{0, 2.8f, 0, 2.8f}, {0, 8.2f, 0, 8.2f}}};
+    g['!'] = {0, {{0, 0, 0, 6.6f}, {0, 9.7f, 0, 9.7f}}};
+    {
+      std::vector<float> s;
+      arc(s, 2.5f, 2.5f, 2.5f, 2.5f, 330, 180); s.insert(s.end(), {0, 7.5f});
+      arc(s, 2.5f, 7.5f, 2.5f, 2.5f, 180, 30);
+      g['C'] = {5, {s}};
+    }
+    {
+      std::vector<float> s = {0, 0, 2.2f, 0};
+      arc(s, 2.2f, 2.8f, 2.8f, 2.8f, 270, 360); s.insert(s.end(), {5, 7.2f});
+      arc(s, 2.2f, 7.2f, 2.8f, 2.8f, 0, 90); s.insert(s.end(), {0, 10, 0, 0});
+      g['D'] = {5, {s}};
+    }
+    g['E'] = {4.6f, {{4.6f, 0, 0, 0, 0, 10, 4.6f, 10}, {0, 5, 3.8f, 5}}};
+    g['F'] = {4.6f, {{4.6f, 0, 0, 0, 0, 10}, {0, 5, 3.8f, 5}}};
+    { std::vector<float> s = {4, 0, 4, 7.6f}; arc(s, 2, 7.6f, 2, 2.4f, 0, 180); g['J'] = {4, {s}}; }
+    g['K'] = {5, {{0, 0, 0, 10}, {5, 0, 0, 6.2f}, {1.7f, 4.4f, 5, 10}}};
+    g['L'] = {4.4f, {{0, 0, 0, 10, 4.4f, 10}}};
+    g['Q'] = g['0'];
+    g['Q'].strokes.push_back({3.1f, 7.4f, 5.4f, 10.4f});
+    {
+      std::vector<float> s;
+      arc(s, 2.5f, 2.6f, 2.4f, 2.6f, 340, 90);
+      arc(s, 2.5f, 7.6f, 2.5f, 2.4f, 270, 520);
+      g['S'] = {5, {s}};
+    }
+    g['W'] = {6.4f, {{0, 0, 1.4f, 10, 3.2f, 3.4f, 5, 10, 6.4f, 0}}};
+    g['Y'] = {5, {{0, 0, 2.5f, 5.2f, 5, 0}, {2.5f, 5.2f, 2.5f, 10}}};
+    g['Z'] = {5, {{0, 0, 5, 0, 0, 10, 5, 10}}};
   }
   if (ch >= 'a' && ch <= 'z') ch -= 32;   // lower case is drawn as capitals
   return g[(unsigned char)ch & 127];
 }
-// Add a line of text, centred on (cx, cy): h = letter height in pixels, th = stroke width, gap = between letters (units).
-static void text(Shape &s, const char *t, float cx, float cy, float h, float th, float gap = 2.2f) {
+// Add a line of text, centred on (cx, cy): h = letter height in pixels, th = stroke width, gap = between letters
+// (units), rot = turned clockwise about its centre (radians).
+typedef std::vector<Shape> Shapes;
+static void textCore(Shape *one, Shapes *many, const char *t, float cx, float cy, float h, float th, float gap, float rot) {
   float k = h / 10, wsum = 0;
   int n = (int)strlen(t);
   for (int i = 0; i < n; i++) wsum += glyph(t[i]).w + (i ? gap : 0);
-  float x = cx - wsum * k / 2, y = cy - h / 2;
+  float x = -wsum * k / 2, y = -h / 2;
+  float cr = cosf(rot), sr = sinf(rot);
+  auto X = [&](float u, float v) { return cx + u * cr - v * sr; };
+  auto Y = [&](float u, float v) { return cy + u * sr + v * cr; };
   for (int i = 0; i < n; i++) {
     const Glyph &g = glyph(t[i]);
+    if (many) many->emplace_back();
+    Shape &s = many ? many->back() : *one;
     for (const auto &st : g.strokes)
-      for (size_t j = 0; j + 3 < st.size(); j += 2)
-        s.seg(x + st[j] * k, y + st[j + 1] * k, x + st[j + 2] * k, y + st[j + 3] * k, th / 2);
+      for (size_t j = 0; j + 3 < st.size(); j += 2) {
+        float u0 = x + st[j] * k, v0 = y + st[j + 1] * k, u1 = x + st[j + 2] * k, v1 = y + st[j + 3] * k;
+        s.seg(X(u0, v0), Y(u0, v0), X(u1, v1), Y(u1, v1), th / 2);
+      }
     x += (g.w + gap) * k;
   }
+}
+static void text(Shape &s, const char *t, float cx, float cy, float h, float th, float gap = 2.2f, float rot = 0) {
+  textCore(&s, nullptr, t, cx, cy, h, th, gap, rot);
+}
+static Shape &add(Shapes &v) { v.emplace_back(); return v.back(); }
+static void fillAll(uint16_t *buf, const Shapes &v, C3 c, float alpha = 1, float grow = 0, float soft = 1) {
+  for (const Shape &s : v) fill(buf, s, c, alpha, grow, soft);
+}
+// The same, one shape per letter: much quicker to fill for long or large text.
+static void text(Shapes &v, const char *t, float cx, float cy, float h, float th, float gap = 2.2f, float rot = 0) {
+  textCore(nullptr, &v, t, cx, cy, h, th, gap, rot);
 }
 
 // ---------- faces ----------
@@ -269,6 +319,21 @@ static const Theme THEMES[FACE_COUNT] = {
     // Midnight: navy and silver, quiet for the night
     {{196, 204, 224}, {120, 134, 170}, {6, 10, 24}, {120, 134, 170}, {226, 228, 236}, {26, 32, 52},
      {200, 208, 226}, {8, 12, 30}, {214, 180, 96}, {200, 208, 226}, {10, 16, 40}},
+    // Pup: sky blue, a puppy in the middle, bone hands
+    {{30, 50, 100}, {70, 100, 160}, {252, 250, 244}, {30, 50, 100}, {250, 240, 200}, {70, 90, 130},
+     {252, 248, 236}, {112, 72, 40}, {220, 50, 50}, {20, 20, 20}, {255, 255, 255}},
+    // Grandfather: silvered chapter ring on a brass plate, black hands
+    {{30, 26, 22}, {96, 76, 44}, {238, 234, 222}, {40, 34, 28}, {245, 236, 205}, {40, 48, 80},
+     {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {200, 160, 80}},
+    // Christmas: green, candy-cane hands, ornaments
+    {{244, 214, 120}, {236, 236, 236}, {10, 44, 24}, {222, 182, 92}, {250, 245, 220}, {20, 50, 35},
+     {252, 252, 252}, {120, 20, 24}, {244, 204, 96}, {204, 30, 40}, {244, 204, 96}},
+    // Advent: red, 24 doors, the time as digits
+    {{244, 214, 120}, {250, 236, 210}, {60, 10, 14}, {222, 182, 92}, {250, 245, 220}, {40, 20, 20},
+     {244, 214, 120}, {60, 10, 14}, {244, 214, 120}, {244, 214, 120}, {60, 10, 14}},
+    // Lit Up: a winter night ringed with big coloured bulbs that chase every second
+    {{250, 250, 250}, {200, 212, 240}, {8, 12, 30}, {230, 190, 90}, {250, 245, 220}, {20, 24, 50},
+     {250, 250, 250}, {16, 80, 36}, {250, 200, 60}, {204, 30, 40}, {250, 200, 60}},
 };
 
 static const C3 GOLD = {212, 172, 84}, SILVER = {196, 202, 214}, BRASS = {196, 156, 72};
@@ -350,6 +415,65 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
+        case 4: {  // Pup: sky blue, white ring, red bezel
+          float t = r / 220;
+          c = mix({184, 222, 244}, {120, 182, 228}, t * t);
+          c = mix(c, {250, 250, 250}, band(r, 218, 226));
+          c = mix(c, metal({214, 56, 56}, r, 226, 238, a), band(r, 226, 238));
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case 5: {  // Grandfather: ring-turned centre, silvered chapter ring, brass plate in the corners
+          C3 ring = {236, 234, 226};
+          c = r < 151 ? mix(mul({214, 208, 192}, 0.95f + 0.05f * sinf(r * 0.95f)), ring, clamp01(r - 150 + 0.5f)) : ring;
+          C3 ink = {30, 26, 22};
+          c = mix(c, ink, band(r, 150, 151.5f));
+          c = mix(c, ink, band(r, 155, 156));
+          c = mix(c, ink, band(r, 200, 201));
+          c = mix(c, ink, band(r, 219, 220.5f));
+          c = mix(c, mul({178, 138, 60}, 0.7f), band(r, 220.5f, 224));
+          if (r > 223) {   // brushed brass
+            C3 plate = mul({178, 138, 60}, 0.93f + 0.05f * sinf((y + 0.5f) * 1.7f + sinf(x * 0.045f) * 2) +
+                                               0.04f * (1 - (dx + dy) / 680));
+            c = mix(c, plate, clamp01(r - 224 + 0.5f));
+          }
+          // a dark edge round the plate
+          float edge = fminf(fminf(x + 0.5f, W - x - 0.5f), fminf(y + 0.5f, H - y - 0.5f));
+          c = mix(c, mul({178, 138, 60}, 0.45f), clamp01(4.5f - edge));
+          break;
+        }
+        case 6: {  // Christmas: deep green, a candy-stripe bezel
+          float t = r / 220;
+          c = mix({24, 96, 54}, {8, 48, 28}, t * t);
+          c = mix(c, {222, 182, 92}, band(r, 218, 222));
+          if (r > 221) {
+            float u = a / PI2 * 40 + (r - 222) / 16 * 0.6f;
+            float f = u - floorf(u);
+            float d = f < 0.5f ? fminf(f, 0.5f - f) : -fminf(f - 0.5f, 1 - f);   // >0 inside a red stripe
+            float edgePx = d * PI2 * r / 40;
+            float red = clamp01(edgePx + 0.5f);
+            C3 stripe = mix({248, 248, 244}, {210, 30, 40}, red);
+            c = mix(c, metal(stripe, r, 222, 238, a + 0.8f), band(r, 222, 238));
+          }
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case 7: {  // Advent: red with a gold frame
+          float ex = fabsf(dx) / 240, ey = fabsf(dy) / 240;
+          c = mul({156, 22, 32}, 1.0f - 0.3f * (ex * ex + ey * ey));
+          float edge = fminf(fminf(x + 0.5f, W - x - 0.5f), fminf(y + 0.5f, H - y - 0.5f));
+          c = mix(c, {222, 182, 92}, band(edge, 5, 8));
+          c = mix(c, {222, 182, 92}, band(edge, 10, 11));
+          break;
+        }
+        case 8: {  // Lit Up: night sky, a white rim, the light string's wire
+          float t = r / 220;
+          c = mix({18, 28, 66}, {4, 8, 24}, t * t);
+          c = mix(c, {236, 240, 250}, band(r, 206, 209));
+          c = mix(c, {6, 8, 16}, clamp01(r - 209 + 0.5f));
+          c = mix(c, {24, 70, 36}, band(r, 214.5f, 217.5f));
+          break;
+        }
         default: {  // Midnight: navy, a fan of fine lines
           float t = r / 222;
           c = mix({20, 32, 70}, {6, 10, 28}, t);
@@ -372,10 +496,241 @@ static void background(uint16_t *buf, int face) {
 
 // Many small shapes: each is filled over its own small area (one shape spanning the dial would be tested at every
 // pixel of the dial against every stroke).
-typedef std::vector<Shape> Shapes;
-static Shape &add(Shapes &v) { v.emplace_back(); return v.back(); }
-static void fillAll(uint16_t *buf, const Shapes &v, C3 c, float alpha = 1, float grow = 0, float soft = 1) {
-  for (const Shape &s : v) fill(buf, s, c, alpha, grow, soft);
+
+// The puppy in the middle of the Pup face: its nose is the centre of the hands.
+static void pup(uint16_t *buf) {
+  const float k = 0.78f;
+  auto X = [&](float v) { return CX + v * k; };
+  auto Y = [&](float v) { return CY + v * k; };
+  Shape ears, head, spot, muzzle, tongue, mouth, eyeW, eyeB, eyeH, brows;
+  ears.seg(X(-46), Y(-50), X(-66), Y(8), 17 * k);
+  ears.seg(X(46), Y(-50), X(66), Y(8), 17 * k);
+  head.disc(X(0), Y(-16), 56 * k);
+  spot.disc(X(24), Y(-40), 18 * k);
+  muzzle.disc(X(-14), Y(8), 21 * k);
+  muzzle.disc(X(14), Y(8), 21 * k);
+  tongue.disc(X(0), Y(30), 10 * k);
+  mouth.seg(X(0), Y(6), X(0), Y(17), 1.8f);
+  mouth.seg(X(0), Y(17), X(-9), Y(21), 1.8f);
+  mouth.seg(X(-9), Y(21), X(-16), Y(17), 1.8f);
+  mouth.seg(X(0), Y(17), X(9), Y(21), 1.8f);
+  mouth.seg(X(9), Y(21), X(16), Y(17), 1.8f);
+  eyeW.disc(X(-21), Y(-30), 11 * k);
+  eyeW.disc(X(21), Y(-30), 11 * k);
+  eyeB.disc(X(-20), Y(-28), 7 * k);
+  eyeB.disc(X(22), Y(-28), 7 * k);
+  eyeH.disc(X(-22.5f), Y(-31), 2.4f * k);
+  eyeH.disc(X(19.5f), Y(-31), 2.4f * k);
+  brows.seg(X(-30), Y(-48), X(-14), Y(-51), 2.2f);
+  brows.seg(X(14), Y(-51), X(30), Y(-48), 2.2f);
+  C3 tan = {204, 150, 92}, brown = {112, 72, 40}, outline = {70, 44, 24};
+  fill(buf, ears, {0, 0, 0}, 0.3f, 0, 6, 3, 4);
+  fill(buf, head, {0, 0, 0}, 0.3f, 0, 6, 3, 4);
+  fill(buf, ears, outline, 1, 1.5f);
+  fill(buf, ears, brown);
+  fill(buf, head, outline, 1, 1.5f);
+  fill(buf, head, tan);
+  fill(buf, spot, brown);
+  fill(buf, tongue, outline, 1, 1.2f);
+  fill(buf, tongue, {236, 104, 124});
+  fill(buf, muzzle, {248, 234, 208});
+  fill(buf, mouth, outline);
+  fill(buf, eyeW, outline, 1, 1.2f);
+  fill(buf, eyeW, {255, 255, 255});
+  fill(buf, eyeB, {20, 20, 20});
+  fill(buf, eyeH, {255, 255, 255});
+  fill(buf, brows, outline);
+}
+
+// Brass scrollwork in one corner of the Grandfather face (right / bottom mirror the top-left one).
+static void spandrel(uint16_t *buf, bool right, bool bottom) {
+  auto X = [&](float v) { return right ? W - v : v; };
+  auto Y = [&](float v) { return bottom ? H - v : v; };
+  Shapes scrolls;                                  // one per edge: small areas to fill
+  Shape leaves, rose, roseDot;
+  auto path = [&](Shape &sc, const std::vector<float> &p, float r) {
+    for (size_t i = 0; i + 3 < p.size(); i += 2) sc.seg(X(p[i]), Y(p[i + 1]), X(p[i + 2]), Y(p[i + 3]), r);
+  };
+  for (int swap = 0; swap < 2; swap++) {           // one scroll along each edge
+    std::vector<float> p = {40, 26, 62, 18, 86, 15, 104, 19};
+    arc(p, 108, 31, 12, 12, 250, 560);
+    std::vector<float> q;
+    arc(q, 108, 31, 6, 6, 200, 380);
+    if (swap) {
+      for (size_t i = 0; i < p.size(); i += 2) std::swap(p[i], p[i + 1]);
+      for (size_t i = 0; i < q.size(); i += 2) std::swap(q[i], q[i + 1]);
+    }
+    Shape &sc = add(scrolls);
+    path(sc, p, 2.4f);
+    path(sc, q, 1.6f);
+    float lv[][3] = {{58, 28, 4.5f}, {80, 25, 4}, {96, 28, 3.2f}};
+    for (auto &l : lv) leaves.disc(X(swap ? l[1] : l[0]), Y(swap ? l[0] : l[1]), l[2]);
+  }
+  rose.disc(X(30), Y(30), 12);
+  for (int i = 0; i < 6; i++) {
+    float a = i * PI2 / 6 + 0.3f;
+    rose.disc(X(30 + 14 * cosf(a)), Y(30 + 14 * sinf(a)), 5);
+  }
+  roseDot.disc(X(30), Y(30), 4.5f);
+  C3 gold = {236, 196, 104}, dark = {92, 66, 22};
+  for (auto &sc : scrolls) fill(buf, sc, {0, 0, 0}, 0.35f, 0, 4, 2, 3);
+  fill(buf, rose, {0, 0, 0}, 0.35f, 0, 4, 2, 3);
+  fillAll(buf, scrolls, dark, 1, 1);
+  fillAll(buf, scrolls, gold);
+  fill(buf, leaves, dark, 1, 1);
+  fill(buf, leaves, gold);
+  fill(buf, rose, dark, 1, 1);
+  fill(buf, rose, gold);
+  fill(buf, roseDot, dark);
+}
+
+// Two lines for the Christmas countdown.
+static void xmasLines(int days, char *l1, char *l2, size_t n) {
+  if (days == 0) { snprintf(l1, n, "MERRY"); snprintf(l2, n, "CHRISTMAS!"); }
+  else if (days == 1) { snprintf(l1, n, "1 DAY"); snprintf(l2, n, "TO CHRISTMAS"); }
+  else { snprintf(l1, n, "%d DAYS", days); snprintf(l2, n, "TO CHRISTMAS"); }
+}
+
+static void countdownWindow(uint16_t *buf, const Theme &t, int days) {
+  char l1[24], l2[24];
+  xmasLines(days, l1, l2, sizeof l1);
+  const float x = CX, y = CY - 94;
+  Shape win, a, b;
+  win.box(x, y, 64, 24, 10);
+  text(a, l1, x, y - 6, 17, 2.8f, 2.0f);
+  text(b, l2, x, y + 14, 8, 1.6f, 1.8f);
+  fill(buf, win, t.windowEdge, 1, 1.5f);
+  fill(buf, win, t.window);
+  fill(buf, a, t.ink);
+  fill(buf, b, t.label);
+}
+
+// ---------- the Advent calendar ----------
+// 24 doors in a fixed shuffled order. In December, doors up to today are open (today's glows); after the 24th
+// they're all open; the rest of the year they're all shut. The banner at the top: the time (drawn by drawHands)
+// and the countdown.
+static const int ADVENT_ORDER[24] = {13, 5, 21, 9, 1, 17, 22, 10, 3, 15, 24, 7, 6, 19, 12, 23, 2, 16, 18, 4, 14, 8, 20, 11};
+static void adventIcon(uint16_t *buf, int kind, float x, float y) {
+  Shape a, b, c;
+  switch (kind) {
+    case 0: {  // star
+      float px5[5], py5[5];
+      for (int i = 0; i < 5; i++) { float an = i * PI2 / 5; px5[i] = x + 7 * sinf(an + PI2 / 10); py5[i] = y - 7 * cosf(an + PI2 / 10); }
+      a.poly(px5, py5, 5);
+      for (int i = 0; i < 5; i++) {
+        float an = i * PI2 / 5;
+        float tx[3] = {x + 18 * sinf(an), px5[(i + 4) % 5], px5[i]}, ty[3] = {y - 18 * cosf(an), py5[(i + 4) % 5], py5[i]};
+        a.poly(tx, ty, 3);
+      }
+      fill(buf, a, {120, 80, 10}, 1, 1);
+      fill(buf, a, {250, 210, 90});
+      break;
+    }
+    case 1: {  // tree
+      for (int i = 0; i < 3; i++) {
+        float top = y - 20 + i * 9, w = 9 + i * 5;
+        float tx[3] = {x, x - w, x + w}, ty[3] = {top, top + 15, top + 15};
+        a.poly(tx, ty, 3);
+      }
+      b.box(x, y + 15, 3.5f, 4, 1);
+      c.disc(x, y - 21, 3.5f);
+      fill(buf, b, {110, 66, 30});
+      fill(buf, a, {40, 150, 70});
+      fill(buf, c, {250, 210, 90});
+      break;
+    }
+    case 2: {  // ornament
+      a.disc(x, y + 3, 15);
+      b.box(x, y - 13, 5, 3.5f, 1);
+      c.disc(x - 5, y - 2, 3.5f);
+      fill(buf, b, {230, 188, 80});
+      fill(buf, a, {214, 34, 44});
+      fill(buf, c, {255, 255, 255}, 0.7f);
+      break;
+    }
+    case 3: {  // present
+      a.box(x, y + 4, 16, 13, 2);
+      b.seg(x, y - 9, x, y + 17, 2.2f);
+      b.seg(x - 16, y + 4, x + 16, y + 4, 2.2f);
+      c.disc(x - 5, y - 12, 4.5f);
+      c.disc(x + 5, y - 12, 4.5f);
+      fill(buf, a, {50, 100, 200});
+      fill(buf, b, {250, 210, 90});
+      fill(buf, c, {250, 210, 90});
+      break;
+    }
+    case 4: {  // candy cane: red and white in turns
+      std::vector<float> p;
+      arc(p, x + 4, y - 10, 7, 7, 180, 360);
+      p.insert(p.begin(), {x - 3, y + 20});
+      std::vector<float> q = {x - 3, y + 20, x - 3, y + 12, x - 3, y + 4, x - 3, y - 4, x - 3, y - 10};
+      q.insert(q.end(), p.begin() + 4, p.end());
+      for (size_t i = 0; i + 3 < q.size(); i += 2) (i / 2 % 2 ? b : a).seg(q[i], q[i + 1], q[i + 2], q[i + 3], 3.4f);
+      fill(buf, a, {250, 250, 250});
+      fill(buf, b, {214, 34, 44});
+      break;
+    }
+    default: {  // snowflake
+      for (int k = 0; k < 3; k++) {
+        float an = k * PI2 / 6, dx = sinf(an) * 17, dy = cosf(an) * 17;
+        a.seg(x - dx, y - dy, x + dx, y + dy, 1.8f);
+      }
+      for (int k = 0; k < 6; k++) {
+        float an = k * PI2 / 6, mx = x + sinf(an) * 10, my = y - cosf(an) * 10;
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+          float b2 = an + sgn * 0.8f;
+          a.seg(mx, my, mx + sinf(b2) * 6, my - cosf(b2) * 6, 1.4f);
+        }
+      }
+      fill(buf, a, {220, 236, 255});
+      break;
+    }
+  }
+}
+static void advent(uint16_t *buf, const Dial &d) {
+  int open = d.month == 12 ? (d.mday > 24 ? 24 : d.mday) : 0;
+  int today = (d.month == 12 && d.mday <= 24) ? d.mday : 0;
+  char l1[24], l2[24], line[48];
+  if (d.daysToXmas >= 0) {
+    xmasLines(d.daysToXmas, l1, l2, sizeof l1);
+    snprintf(line, sizeof line, "%s %s", l1, l2);
+    Shapes t;
+    text(t, line, CX, 104, 14, 2.4f, 2.0f);
+    fillAll(buf, t, {250, 236, 210});
+  }
+  static const C3 doors[3] = {{26, 112, 62}, {236, 226, 200}, {34, 66, 128}};
+  const float x0 = 20, y0 = 128, gw = 440, gh = 334, gap = 8;
+  const float dw = (gw - 5 * gap) / 6, dh = (gh - 3 * gap) / 4;
+  for (int i = 0; i < 24; i++) {
+    int n = ADVENT_ORDER[i];
+    float cx = x0 + (i % 6) * (dw + gap) + dw / 2, cy = y0 + (i / 6) * (dh + gap) + dh / 2;
+    C3 col = doors[i % 3];
+    C3 ink = i % 3 == 1 ? C3{150, 24, 34} : C3{244, 214, 120};
+    Shape door;
+    door.box(cx, cy, dw / 2, dh / 2, 6);
+    char num[4];
+    snprintf(num, sizeof num, "%d", n);
+    if (n == today) fill(buf, door, {255, 214, 110}, 0.9f, 3, 10);        // today's door glows
+    fill(buf, door, {0, 0, 0}, 0.35f, 0, 5, 2, 3);
+    if (n <= open) {
+      if (n == today) fill(buf, door, {255, 214, 110}, 1, 2.5f);            // a gold edge
+      fill(buf, door, {48, 22, 14});                                        // inside
+      Shape hinge, small;
+      hinge.box(cx - dw / 2 + 4, cy, 4, dh / 2, 2);                        // the door, swung open
+      fill(buf, hinge, col);
+      text(small, num, cx + dw / 2 - 12, cy + dh / 2 - 10, 9, 1.6f, 1.6f);
+      fill(buf, small, {244, 214, 120});
+      adventIcon(buf, n % 6, cx + 3, cy - 2);
+    } else {
+      Shape inner, t;
+      inner.box(cx, cy, dw / 2 - 5, dh / 2 - 5, 4);
+      fill(buf, door, col);
+      fill(buf, inner, mul(col, 1.12f), 1, 0, 1);
+      fill(buf, inner, col, 1, -1.5f);
+      text(t, num, cx, cy, 28, 4.4f, 2.0f);
+      fill(buf, t, ink);
+    }
+  }
 }
 
 static void markers(uint16_t *buf, int face, bool moon) {
@@ -443,6 +798,126 @@ static void markers(uint16_t *buf, int face, bool moon) {
       fillAll(buf, nums, {20, 20, 20});
       break;
     }
+    case 4: {  // Pup: chunky 12 3 6 9, paw prints at the other hours, the puppy in the middle
+      for (int m = 0; m < 60; m++)
+        if (m % 5) add(ticks).disc(px(m * M60, 211), py(m * M60, 211), 1.6f);
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        HandBuilder p(h * H12);
+        p.disc(184, 7.5f);                                       // the pad, toes further out
+        p.sh.disc(p.X(196, -9), p.Y(196, -9), 3.4f);
+        p.sh.disc(p.X(200, -3.2f), p.Y(200, -3.2f), 3.4f);
+        p.sh.disc(p.X(200, 3.2f), p.Y(200, 3.2f), 3.4f);
+        p.sh.disc(p.X(196, 9), p.Y(196, 9), 3.4f);
+        bars.push_back(p.sh);
+      }
+      const char *q[4] = {"12", "3", "6", "9"};
+      for (int i = 0; i < 4; i++) {
+        float a = i * 3 * H12;
+        text(add(nums), q[i], px(a, 178), py(a, 178), 40, 7, 2.2f);
+      }
+      fillAll(buf, ticks, {255, 255, 255});
+      fillAll(buf, bars, {112, 72, 40});
+      fillAll(buf, nums, {255, 255, 255}, 1, 2.5f);
+      fillAll(buf, nums, {30, 50, 100});
+      pup(buf);
+      break;
+    }
+    case 5: {  // Grandfather: Roman numerals round the ring, minute track, brass corners with scrollwork
+      for (int m = 0; m < 60; m++) {
+        float a = m * M60;
+        if (m % 5) add(ticks).seg(px(a, 203), py(a, 203), px(a, 217), py(a, 217), 0.6f);
+        else {
+          HandBuilder d(a);
+          d.poly({201, -1.6f, 219, -1.6f, 219, 1.6f, 201, 1.6f});
+          ticks.push_back(d.sh);
+        }
+      }
+      static const char *R[12] = {"XII", "I", "II", "III", "IIII", "V", "VI", "VII", "VIII", "IX", "X", "XI"};
+      for (int h = 0; h < 12; h++) {
+        float a = h * H12;
+        text(nums, R[h], px(a, 178), py(a, 178), 30, 3.2f, 2.1f, a);   // feet towards the centre
+      }
+      fillAll(buf, ticks, {30, 26, 22});
+      fillAll(buf, nums, {30, 26, 22});
+      for (int c = 0; c < 4; c++) spandrel(buf, c & 1, c >> 1);
+      break;
+    }
+    case 6: {  // Christmas: gold 12 3 6 9, ornaments at the other hours, snowflakes
+      static const float flakes[][3] = {{-150, -60, 16}, {140, -150, 12}, {-60, 160, 13}, {158, 70, 14},
+                                        {-128, 120, 10}, {60, -176, 9},  {-170, 30, 8},  {110, 150, 9}};
+      for (auto &f : flakes) {
+        Shape &s = add(ticks);
+        for (int k = 0; k < 3; k++) {
+          float a = k * PI2 / 6;
+          float dx = sinf(a) * f[2], dy = cosf(a) * f[2];
+          s.seg(CX + f[0] - dx, CY + f[1] - dy, CX + f[0] + dx, CY + f[1] + dy, 1.2f);
+        }
+      }
+      fillAll(buf, ticks, {255, 255, 255}, 0.22f);
+      ticks.clear();
+      for (int m = 0; m < 60; m++)
+        if (m % 5) add(ticks).disc(px(m * M60, 211), py(m * M60, 211), 1.3f);
+      fillAll(buf, ticks, {240, 240, 236});
+      static const C3 balls[3] = {{214, 34, 44}, {230, 188, 80}, {70, 130, 210}};
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        float a = h * H12;
+        Shape cap, ball, shine;
+        HandBuilder b(a);
+        b.poly({201, -3, 207, -3, 207, 3, 201, 3});
+        cap = b.sh;
+        ball.disc(px(a, 191), py(a, 191), 10);
+        shine.disc(px(a, 191) - 3.5f, py(a, 191) - 3.5f, 2.6f);
+        fill(buf, ball, {0, 0, 0}, 0.4f, 0, 4, 2, 3);
+        fill(buf, cap, {230, 188, 80});
+        fill(buf, ball, balls[h % 3]);
+        fill(buf, shine, {255, 255, 255}, 0.75f);
+      }
+      const char *q[4] = {"12", "3", "6", "9"};
+      for (int i = 0; i < 4; i++) {
+        float a = i * 3 * H12;
+        text(add(nums), q[i], px(a, 172), py(a, 172), 40, 5.5f, 2.4f);
+      }
+      fillAll(buf, nums, {0, 0, 0}, 0.5f, 1.5f, 3);
+      fillAll(buf, nums, {244, 214, 120});
+      break;
+    }
+    case 7:    // Advent: drawn by advent()
+      break;
+    case 8: {  // Lit Up: white numerals, mini bulbs at the hours, snowflakes (the big bulbs come with the hands)
+      static const float flakes[][3] = {{-150, -60, 14}, {140, -150, 11}, {-60, 160, 12}, {158, 70, 13},
+                                        {-128, 120, 9}, {60, -176, 8},  {-170, 30, 8},  {110, 150, 9}};
+      for (auto &f : flakes) {
+        Shape &s = add(ticks);
+        for (int k = 0; k < 3; k++) {
+          float a = k * PI2 / 6, dx = sinf(a) * f[2], dy = cosf(a) * f[2];
+          s.seg(CX + f[0] - dx, CY + f[1] - dy, CX + f[0] + dx, CY + f[1] + dy, 1.1f);
+        }
+      }
+      fillAll(buf, ticks, {255, 255, 255}, 0.25f);
+      static const C3 mini[4] = {{255, 70, 70}, {80, 230, 110}, {90, 150, 255}, {255, 210, 70}};
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        float a = h * H12;
+        Shape glow, bulb;
+        glow.disc(px(a, 198), py(a, 198), 5);
+        HandBuilder b(a);
+        b.disc(196, 4.2f);
+        b.poly({196, -3.6f, 207, 0, 196, 3.6f});
+        fill(buf, glow, mini[h % 4], 0.55f, 4, 10);
+        fill(buf, b.sh, mini[h % 4]);
+      }
+      const char *q[4] = {"12", "3", "6", "9"};
+      for (int i = 0; i < 4; i++) {
+        float a = i * 3 * H12;
+        text(nums, q[i], px(a, 176), py(a, 176), 40, 6, 2.4f);
+      }
+      fillAll(buf, nums, {120, 170, 255}, 0.5f, 2, 8);
+      fillAll(buf, nums, {250, 250, 255});
+      break;
+    }
+    case 3:
     default: {  // Midnight: Roman quarters, silver bars, minute dots
       for (int m = 0; m < 60; m++)
         if (m % 5) add(ticks).disc(px(m * M60, 212), py(m * M60, 212), 1.3f);
@@ -538,12 +1013,14 @@ void renderDial(uint16_t *buf, const Dial &d) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
   const Theme &t = THEMES[f];
   background(buf, f);
+  if (f == 7) { advent(buf, d); return; }       // the Advent calendar fills the screen: no windows
   markers(buf, f, d.moon);
   if (d.temps) {
     tempWindow(buf, t, CX - 96, CY, "IN", d.in, d.inHum);
     tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
   }
-  if (d.pres[0]) pressureWindow(buf, t, d.pres);
+  if ((f == 6 || f == 8) && d.daysToXmas >= 0) countdownWindow(buf, t, d.daysToXmas);   // in place of the pressure
+  else if (d.pres[0]) pressureWindow(buf, t, d.pres);
   if (d.moon) moonWindow(buf, t, d.moonPhase);
 }
 
@@ -566,6 +1043,31 @@ static void handShapes(int face, int which, float a, Shape &out) {   // which: 0
       else if (which == 1) { h.poly({-26, -4, 172, -2.5f, 172, 2.5f, -26, 4}); h.poly({166, 0, 182, -5.5f, 204, 0, 182, 5.5f}); h.disc(-26, 5); }
       else { h.line(-40, 196, 1.2f); h.disc(150, 4.5f); h.disc(-30, 6); }
       break;
+    case 4:  // Pup: bones
+      if (which == 0) { h.line(-8, 92, 6); h.sh.disc(h.X(92, -6), h.Y(92, -6), 7.5f); h.sh.disc(h.X(92, 6), h.Y(92, 6), 7.5f);
+                        h.sh.disc(h.X(-8, -6), h.Y(-8, -6), 7.5f); h.sh.disc(h.X(-8, 6), h.Y(-8, 6), 7.5f); }
+      else if (which == 1) { h.line(-10, 168, 4.5f); h.sh.disc(h.X(168, -5), h.Y(168, -5), 6); h.sh.disc(h.X(168, 5), h.Y(168, 5), 6);
+                             h.sh.disc(h.X(-10, -5), h.Y(-10, -5), 6); h.sh.disc(h.X(-10, 5), h.Y(-10, 5), 6); }
+      else { h.line(-30, 196, 1.3f); h.disc(176, 6); }                      // a red ball
+      break;
+    case 5:  // Grandfather: spade hour, a slim minute with a bead, fine seconds
+      if (which == 0) {
+        h.rect(-22, 64, 6); h.disc(36, 7); h.disc(-22, 7);
+        h.poly({58, 0, 76, -14, 98, 0, 76, 14}); h.disc(72, 8); h.poly({94, -4, 120, 0, 94, 4});
+      } else if (which == 1) { h.rect(-28, 170, 4); h.disc(118, 5.5f); h.disc(-28, 6); h.poly({160, 0, 174, -6, 204, 0, 174, 6}); }
+      else { h.line(-40, 190, 1.0f); h.disc(-30, 5); }
+      break;
+    case 6:  // Christmas: candy canes (stripes added in drawHands)
+      if (which == 0) h.line(-16, 104, 6.5f);
+      else if (which == 1) h.line(-20, 178, 5);
+      else { h.line(-36, 196, 1.3f); h.disc(186, 5); }
+      break;
+    case 8:  // Lit Up: plain tapered hands with a round end
+      if (which == 0) { h.poly({-18, -6, 104, -3.5f, 104, 3.5f, -18, 6}); h.disc(106, 6); }
+      else if (which == 1) { h.poly({-22, -4.5f, 184, -2.5f, 184, 2.5f, -22, 4.5f}); h.disc(186, 4.5f); }
+      else { h.line(-36, 200, 1.2f); h.disc(-28, 5); }
+      break;
+    case 3:
     default:  // Midnight: slim dauphine
       if (which == 0) { h.poly({-18, -7, 126, 0, -18, 7}); h.disc(-18, 7); }
       else if (which == 1) { h.poly({-24, -5.5f, 206, 0, -24, 5.5f}); h.disc(-24, 5.5f); }
@@ -575,23 +1077,88 @@ static void handShapes(int face, int which, float a, Shape &out) {   // which: 0
   out = h.sh;
 }
 
+// Red stripes across a candy-cane hand from t0 to t1, w wide.
+static void caneStripes(uint16_t *buf, float a, float t0, float t1, float w) {
+  for (float t = t0; t + 9 < t1; t += 13) {
+    HandBuilder h(a);
+    h.poly({t, -w / 2, t + 5, -w / 2, t + 9, w / 2, t + 4, w / 2});
+    fill(buf, h.sh, {204, 30, 40});
+  }
+}
+
+static void digitalTime(uint16_t *buf, float hour, float minute) {
+  int h = (int)hour % 24, m = (int)minute % 60;
+  char t[12];
+  snprintf(t, sizeof t, "%d:%02d", (h + 11) % 12 + 1, m);
+  Shapes a, b;
+  text(a, t, CX - 16, 54, 54, 7, 2.2f);
+  float right = 0;
+  for (auto &g : a) right = fmaxf(right, g.x1);
+  text(b, h < 12 ? "AM" : "PM", right + 22, 70, 16, 2.6f, 1.8f);
+  fillAll(buf, a, {0, 0, 0}, 0.4f, 1, 4);
+  fillAll(buf, a, {244, 214, 120});
+  fillAll(buf, b, {244, 214, 120});
+}
+
+// The big bulbs round the Lit Up face: three in four lit, the pattern stepping along every second.
+static void bulbs(uint16_t *buf, int step) {
+  static const C3 cols[5] = {{255, 50, 50}, {40, 220, 90}, {70, 130, 255}, {255, 200, 40}, {255, 130, 30}};
+  const int N = 32;
+  for (int i = 0; i < N; i++) {
+    float a = (i + 0.5f) * PI2 / N;
+    bool lit = (i + step) % 4 != 0;
+    C3 c = cols[i % 5];
+    HandBuilder b(a);
+    b.disc(226, 8);
+    b.poly({223, -7.6f, 241, 0, 223, 7.6f});
+    Shape sock;
+    HandBuilder k(a);
+    k.rect(213, 220, 9);
+    sock = k.sh;
+    if (lit) {
+      Shape glow;
+      glow.disc(px(a, 226), py(a, 226), 9);
+      fill(buf, glow, c, 0.75f, 8, 18);
+    }
+    fill(buf, sock, {30, 90, 44});
+    fill(buf, b.sh, lit ? c : mul(c, 0.3f));
+    if (lit) {
+      Shape shine;
+      shine.disc(b.X(228, -3), b.Y(228, -3), 2.4f);
+      fill(buf, shine, {255, 255, 255}, 0.7f);
+    }
+  }
+}
+
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds) {
   int f = face < 0 || face >= FACE_COUNT ? 0 : face;
   const Theme &t = THEMES[f];
+  if (f == 7) { digitalTime(buf, hour, minute); return; }
+  if (f == 8) bulbs(buf, (int)second);   // the screen redraws this face every second
   float ah = fmodf(hour, 12) / 12 * PI2, am = minute / 60 * PI2, as = second / 60 * PI2;
   Shape s;
   handShapes(f, 0, ah, s);
   fill(buf, s, {0, 0, 0}, 0.42f, 0, 7, 3, 5);
   fill(buf, s, t.handEdge, 1, 1.1f);
   fill(buf, s, t.hands);
+  if (f == 6) caneStripes(buf, ah, -10, 100, 13);
   handShapes(f, 1, am, s);
   fill(buf, s, {0, 0, 0}, 0.42f, 0, 7, 4, 6);
   fill(buf, s, t.handEdge, 1, 1.1f);
   fill(buf, s, t.hands);
+  if (f == 6) caneStripes(buf, am, -14, 176, 10);
   if (showSeconds) {
     handShapes(f, 2, as, s);
     fill(buf, s, {0, 0, 0}, 0.35f, 0, 5, 4, 7);
     fill(buf, s, t.second);
+  }
+  if (f == 4) {                                 // Pup: the hub is the puppy's nose
+    Shape nose, shine;
+    nose.box(CX, CY, 12, 9, 7);
+    shine.disc(CX - 4, CY - 4, 2.6f);
+    fill(buf, nose, {20, 20, 20});
+    fill(buf, shine, {255, 255, 255}, 0.85f);
+    return;
   }
   Shape hub, dot;
   hub.disc(CX, CY, f == 3 ? 8 : 10);
@@ -615,7 +1182,8 @@ const char *moonName(float p) {
 }
 
 const char *faceName(int f) {
-  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline", "Ivory", "Midnight"};
+  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline", "Ivory", "Midnight", "Pup",
+                                             "Grandfather", "Christmas", "Advent", "Lit Up"};
   return f >= 0 && f < FACE_COUNT ? n[f] : n[0];
 }
 

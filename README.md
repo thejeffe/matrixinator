@@ -18,12 +18,16 @@ and pixels arrive as **DDP on UDP 4048**. Each LED is drawn as a round dot; the 
 
 - **Auto**: Signinator's pictures; dark when it sends nothing.
 - **Auto (with clock)** (default): Signinator's pictures; when it sends nothing, an art deco analog clock during the
-  clock's hours (default 5:00 on, 22:30 off). Outside the hours the screen is dark; a tap shows the clock for 30 s.
+  clock's hours (default 5:00 to 22:30). At night: off or dimmed (see below).
 - **Clock only**: the clock during its hours, pictures ignored.
 
 Faces: **Gatsby** (black and gold sunburst), **Skyline** (steel, a crown of stepped triangles), **Ivory** (cream,
-black chapter ring, jade), **Midnight** (navy and silver, quiet at night). Options: second hand, moon phase,
-clock brightness, time zone (time comes from NTP).
+black chapter ring, jade), **Midnight** (navy and silver, quiet at night), **Pup** (a cartoon puppy, bone hands,
+its nose is the hub), **Grandfather** (silvered chapter ring with Roman numerals, brass corners with scrollwork),
+**Christmas** (candy-cane hands, ornaments, days to Christmas), **Advent** (24 doors that open through December,
+the time as digits) and **Lit Up** (a ring of big Christmas bulbs that chase every second, days to Christmas).
+Options: second hand, moon phase, clock brightness, time zone (time comes from NTP), and **at night**: screen off
+(a tap shows the clock for 30 s) or the clock dimmed to its own brightness.
 
 **Home Assistant weather**: the URL, a long-lived access token (HA: Profile > Security) and up to five sensor
 entity ids: inside and outside temperature, inside and outside humidity, air pressure (any can be left empty).
