@@ -24,6 +24,8 @@
 #include <time.h>
 #include "board.h"
 #include "clock.h"
+#include "face_previews.h"
+static_assert(sizeof FACE_PREVIEWS / sizeof FACE_PREVIEWS[0] == clk::FACE_COUNT, "run tools/preview/make_previews.py");
 #include "panel_init.h"
 #include "improv.h"
 
@@ -1225,14 +1227,14 @@ static void handleRoot() {
     h += "<option value=" + String(m) + (S.mode == m ? " selected>" : ">") + MODES[m] + "</option>";
   h += "</select></label><p class=note>Auto: dark when Signinator sends nothing. Auto (with clock): the clock "
        "instead, during the hours below. Clock only: always the clock in those hours, pictures ignored.</p>"
-       "<label>Face<select name=face onchange=\"pv.style.opacity=.35;pv.src='/api/clock.bmp?face='+this.value+'&t='+Date.now()\">";
+       "<label>Face<select name=face onchange=\"pv.style.opacity=.35;pv.src='/api/clock.jpg?face='+this.value\">";
   for (int f = 0; f < clk::FACE_COUNT; f++)
     h += "<option value=" + String(f) + (S.face == f ? " selected>" : ">") + clk::faceName(f) + "</option>";
   h += "</select></label>"
-       "<img id=pv alt='Clock preview (after the time is set)' src='/api/clock.bmp?face=" + String(S.face) +
+       "<img id=pv alt='Clock preview' src='/api/clock.jpg?face=" + String(S.face) +
        "' onload=\"this.style.opacity=1\" onerror=\"this.style.opacity=1\""
        " style='width:100%;max-width:320px;aspect-ratio:1;display:block;margin:6px auto;border-radius:10px;background:#000;transition:opacity .2s'>"
-       "<p class=note style='text-align:center'>Preview of the face as it would look now. Pick one, then Save.</p>"
+       "<p class=note style='text-align:center'>Preview of the face (sample weather). Pick one, then Save.</p>"
        "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
        "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
        "<label>Day starts at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
@@ -1504,64 +1506,13 @@ static void setupWeb() {
     fillClock(d.to<JsonObject>());
     sendJson(d);
   });
-  // A picture of a clock face as it would look now (face=N, default the saved one): 240x240, 16-bit BMP.
-  web.on("/api/clock.bmp", HTTP_GET, [] {
-    if (updating || !timeOk()) { web.send(503, "text/plain", updating ? "Updating firmware" : "Time not set yet"); return; }
-    static uint16_t *pv = nullptr, *pvBase = nullptr;
-    static char pvKey[48] = "";
-    if (!pv) pv = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
-    if (!pvBase) pvBase = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
-    if (!pv || !pvBase) { web.send(500, "text/plain", "No memory"); return; }
+  // A picture of clock face N (default the saved one), drawn ahead of time on a PC (tools/preview/make_previews.py)
+  // with sample weather: 240x240 JPEG. Drawing it here took seconds and slowed the screen.
+  web.on("/api/clock.jpg", HTTP_GET, [] {
     int face = web.hasArg("face") ? constrain(web.arg("face").toInt(), 0, clk::FACE_COUNT - 1) : S.face;
-    time_t now = time(nullptr);
-    tm t;
-    localtime_r(&now, &t);
-    clk::Dial d = makeDial(now, t, face, nullptr);
-    uint32_t t0 = millis();
-    char k[48];
-    clk::baseKey(d, k, sizeof k);
-    if (strcmp(k, pvKey) != 0) { clk::renderBase(pvBase, d); strlcpy(pvKey, k, sizeof pvKey); }
-    memcpy(pv, pvBase, (size_t)TFT_W * TFT_H * 2);
-    clk::renderExtras(pv, d);
-    float hh, mm;
-    handTimes(t, hh, mm);
-    clk::drawHands(pv, face, hh, mm, t.tm_sec, S.secs && clk::faceHasSeconds(face));
-    web.sendHeader("X-Render-Ms", String(millis() - t0));
-    // half size: each output pixel is the average of 2x2
-    const int PW = TFT_W / 2, PH = TFT_H / 2;
-    uint16_t *small = pv;                          // written in place: row y only reads rows 2y, 2y+1 >= y
-    for (int y = 0; y < PH; y++)
-      for (int x = 0; x < PW; x++) {
-        const uint16_t *a = pv + (2 * y) * TFT_W + 2 * x, *b = a + TFT_W;
-        uint32_t r = 0, g = 0, bl = 0;
-        for (uint16_t c : {a[0], a[1], b[0], b[1]}) { r += c >> 11; g += (c >> 5) & 63; bl += c & 31; }
-        small[y * PW + x] = ((r / 4) << 11) | ((g / 4) << 5) | (bl / 4);
-      }
-    const uint32_t data = (uint32_t)PW * PH * 2, off = 14 + 40 + 12;
-    uint8_t hd[off] = {};
-    auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) hd[at + i] = v >> (8 * i); };
-    hd[0] = 'B'; hd[1] = 'M';
-    put32(2, off + data);
-    put32(10, off);
-    put32(14, 40);
-    put32(18, PW);
-    put32(22, (uint32_t)(-PH));                    // negative height: rows top to bottom
-    hd[26] = 1; hd[28] = 16;
-    put32(30, 3);                                  // BI_BITFIELDS: RGB565
-    put32(34, data);
-    put32(38, 2835); put32(42, 2835);
-    put32(54, 0xF800); put32(58, 0x07E0); put32(62, 0x001F);
-    web.setContentLength(off + data);
-    web.sendHeader("Cache-Control", "no-store");
-    web.send(200, "image/bmp", "");
-    WiFiClient c = web.client();
-    c.write(hd, off);
-    const uint8_t *p = (const uint8_t *)small;
-    for (uint32_t sent = 0; sent < data && c.connected();) {
-      size_t n = c.write(p + sent, min<uint32_t>(4800, data - sent));
-      if (!n) { delay(2); continue; }
-      sent += n;
-    }
+    const FacePreview &p = FACE_PREVIEWS[face];
+    web.sendHeader("Cache-Control", "max-age=86400");
+    web.send_P(200, "image/jpeg", (const char *)p.data, p.len);
   });
   web.on("/api/restart", HTTP_POST, [] {
     web.send(200, "application/json", "{\"ok\":true}");
