@@ -1259,7 +1259,7 @@ var q=function(i){return document.getElementById(i)},F=document.querySelector('s
 if(!F||!cv)return;
 function img(u){return new Promise(function(r){var i=new Image();i.onload=function(){r(i)};i.onerror=function(){r(null)};i.src=u})}
 function px(i){var c=document.createElement('canvas');c.width=c.height=240;var x=c.getContext('2d');x.drawImage(i,0,0,240,240);return x.getImageData(0,0,240,240).data}
-async function layers(f){if(L[f]===undefined){var a=await img('/api/clock.jpg?face='+f+'&layer=base'),b=await img('/api/clock.jpg?face='+f+'&layer=mask');L[f]=a&&b?[px(a),px(b)]:0}return L[f]}
+async function layers(f){if(L[f]===undefined){var a=await img('/api/clock.jpg?face='+f+'&layer=base&v='+PV),b=await img('/api/clock.jpg?face='+f+'&layer=mask&v='+PV);L[f]=a&&b?[px(a),px(b)]:0}return L[f]}
 async function draw(){var f=+F.value,d=DIG[f];
  if(!d){cv.style.display='none';pv.style.display='block';return}
  var l=await layers(f);if(+F.value!=f)return;
@@ -1314,7 +1314,7 @@ static void handleRoot() {
     h += "<option value=" + String(m) + (S.mode == m ? " selected>" : ">") + MODES[m] + "</option>";
   h += "</select></label><p class=note>Auto: dark when Signinator sends nothing. Auto (with clock): the clock "
        "instead, during the hours below. Clock only: always the clock in those hours, pictures ignored.</p>"
-       "<label>Face<select name=face onchange=\"pv.style.opacity=.35;pv.src='/api/clock.jpg?face='+this.value\">";
+       "<label>Face<select name=face onchange=\"pv.style.opacity=.35;pv.src='/api/clock.jpg?v='+PV+'&face='+this.value\">";
   for (int f = 0; f < clk::FACE_COUNT; f++) {          // grouped: Classic, Holidays, Digital
     if (!f || strcmp(clk::faceGroup(f), clk::faceGroup(f - 1)))
       h += String(f ? "</optgroup>" : "") + "<optgroup label=\"" + clk::faceGroup(f) + "\">";
@@ -1322,7 +1322,7 @@ static void handleRoot() {
   }
   h += "</optgroup></select></label>"
        "<p class=note>The holiday faces count down to their day in the window under 12.</p>"
-       "<img id=pv alt='Clock preview' src='/api/clock.jpg?face=" + String(S.face) +
+       "<img id=pv alt='Clock preview' src='/api/clock.jpg?v=" + String(VERSION) + "&face=" + String(S.face) +
        "' onload=\"this.style.opacity=1\" onerror=\"this.style.opacity=1\""
        " style='width:100%;max-width:320px;aspect-ratio:1;display:block;margin:6px auto;border-radius:10px;background:#000;transition:opacity .2s'>"
        "<canvas id=pvc width=240 height=240 style='display:none;width:100%;max-width:320px;aspect-ratio:1;margin:6px auto;border-radius:10px;background:#000'></canvas>"
@@ -1376,6 +1376,7 @@ static void handleRoot() {
            "<input type=hidden name=du" + String(f) + " id=du" + f + " value=" + clk::digitUnlitPct(f) + ">";
     }
     dj += "}";
+    h += "<script>var PV='" + String(VERSION) + "';</script>";   // in the picture links: a new firmware's pictures aren't taken from the browser's cache
     h += "<style>.sw{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}.sw button{padding:6px 9px;color:#000;border:0;"
          "border-radius:6px;font-size:13px}.nb button{padding:1px 9px;margin-left:4px;font-size:14px}input[type=range]{width:100%}</style><script>var DIG=" + dj + ";</script>";
   }
