@@ -30,6 +30,11 @@ coins), **Easter** (painted eggs, daisies, a pastel bezel), **July 4th** (stars,
 (candy-cane hands, ornaments) and **Advent** (24 doors that open through December, the time as digits); and three
 digital ones with the date, weather and moon: **Digital** (seven segments in any colour: a 70s stereo's green-blue
 by default, or red for an old alarm clock), **Nixie** (glowing tubes) and **Flip** (flip-clock cards).
+The **Flip** face flips: when the minute turns, the top half of each changed card folds down and the new bottom
+half falls into place. **Chimes** (off, on the hour, or on the hour and the quarters; day hours only): rings of
+light from the middle in the face's colour, one at :15, two at :30, three at :45, and on the hour four then one
+strong ring for each hour. Test buttons on the settings page (or `POST /api/clock {"test":"chime15"}`, `chime30`,
+`chime45`, `chime00`, `flip`) show them on the screen.
 Options: second hand, moon phase, clock brightness, time zone (time comes from NTP), and **at night**: screen off
 (a tap shows the clock for 30 s) or the clock dimmed to its own brightness.
 

@@ -1912,6 +1912,15 @@ const char *moonName(float p) {
   return n[(int)floorf(p * 8 + 0.5f) % 8];
 }
 
+bool isFlip(int f) { return f == F_FLIP; }
+void flipCard(int k, int &x0, int &y0, int &x1, int &y1) { x0 = k ? 246 : 28; x1 = k ? 452 : 234; y0 = 92; y1 = 308; }
+uint32_t chimeColor(int f) {
+  if (f < 0 || f >= FACE_COUNT) f = 0;
+  if (isDigital(f)) return digitColor(f);
+  C3 c = THEMES[f].ink;
+  return ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | (uint32_t)c.b;
+}
+
 void init() { glyph('0'); }
 bool faceHasSeconds(int f) { return f != F_ADVENT; }
 

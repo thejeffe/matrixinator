@@ -64,6 +64,12 @@ void setDigitLevels(int face, int glowPct, int unlitPct);
 int digitGlowPct(int face);
 int digitUnlitPct(int face);
 
+// Animations drawn by the screen over the dial: the Flip face's two cards (x0, y0, x1, y1; the split is half way
+// down), and the colour of the chime rings for a face (0xRRGGBB).
+bool isFlip(int face);
+void flipCard(int k, int &x0, int &y0, int &x1, int &y1);
+uint32_t chimeColor(int face);
+
 void init();                             // build the font once, before drawing from two tasks at a time
 void setYield(void (*fn)());             // called now and then during long drawing (lets other tasks run)
 

@@ -51,6 +51,7 @@ struct Settings {
   int clkBri = 200;
   int night = 0;            // outside the clock's hours: 0 = screen off, 1 = the clock, dimmed
   int nightBri = 40;
+  int chimes = 2;           // visual chimes: 0 off, 1 on the hour, 2 on the hour and the quarters
   int bootSecs = 20;        // power-on: the Matrix rain plays this long before pictures or the clock
   String tz = "PST8PDT,M3.2.0,M11.1.0";
   // Home Assistant temperatures
@@ -92,6 +93,7 @@ static void loadSettings() {
   S.night = constrain(prefs.getInt("night", 0), 0, 1);
   S.nightBri = constrain(prefs.getInt("nbri", 40), 5, 255);
   S.bootSecs = constrain(prefs.getInt("boot", 20), 0, 120);
+  S.chimes = constrain(prefs.getInt("chime", 2), 0, 2);
   S.tz = prefs.getString("tz", "PST8PDT,M3.2.0,M11.1.0");
   S.ha = prefs.getBool("ha", false);
   S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
@@ -143,6 +145,7 @@ static void saveSettings() {
   prefs.putInt("night", S.night);
   prefs.putInt("nbri", S.nightBri);
   prefs.putInt("boot", S.bootSecs);
+  prefs.putInt("chime", S.chimes);
   prefs.putString("tz", S.tz);
   prefs.putBool("ha", S.ha);
   prefs.putString("haurl", S.haUrl);
@@ -873,6 +876,119 @@ static void handTimes(const tm &t, float &h, float &m) {
   m = t.tm_min + t.tm_sec / 60.0f;
 }
 
+// ---------- clock animations: the Flip face's cards, and visual chimes ----------
+// Both are drawn over a copy of the dial, frame by frame (about 20 a second) while they run; the rest of the time
+// the clock is still drawn once a second.
+static uint16_t *flipOld = nullptr;          // Flip: the dial as it was before the minute turned
+static uint32_t flipAt = 0;                  // when the flip started (0 = not flipping)
+static bool flipCardOn[2] = {false, false};  // which cards changed (the hours card only flips on the hour)
+static const uint32_t FLIP_MS = 560;
+static inline uint16_t shade565(uint16_t c, int k) {   // k: 0..256
+  return (uint16_t)((((c >> 11) * k >> 8) << 11) | ((((c >> 5) & 63) * k >> 8) << 5) | ((c & 31) * k >> 8));
+}
+static void startFlip() {                    // flipOld: before; dialBuf: after
+  bool any = false;
+  for (int k = 0; k < 2; k++) {
+    int x0, y0, x1, y1;
+    clk::flipCard(k, x0, y0, x1, y1);
+    flipCardOn[k] = false;
+    for (int y = y0; y < y1 && !flipCardOn[k]; y++)
+      flipCardOn[k] = memcmp(flipOld + y * TFT_W + x0, dialBuf + y * TFT_W + x0, (x1 - x0) * 2) != 0;
+    any |= flipCardOn[k];
+  }
+  flipAt = any ? (millis() | 1) : 0;
+}
+// A split-flap card: the old top half folds down over the new one, then the new bottom half falls into place.
+static void drawFlip(uint16_t *out, uint32_t now) {
+  float p = (now - flipAt) / (float)FLIP_MS;
+  if (p >= 1) { flipAt = 0; return; }
+  for (int k = 0; k < 2; k++) {
+    if (!flipCardOn[k]) continue;
+    int x0, y0, x1, y1;
+    clk::flipCard(k, x0, y0, x1, y1);
+    int ym = (y0 + y1) / 2, n = x1 - x0;
+    for (int y = ym; y < y1; y++) memcpy(out + y * TFT_W + x0, flipOld + y * TFT_W + x0, n * 2);   // old bottom
+    if (p < 0.5f) {                          // the old top flap, folding towards the split
+      float q = p * 2, hf = (ym - y0) * cosf(q * 1.5707963f);
+      int h = (int)hf, k8 = (int)(256 * (1 - 0.5f * q));
+      for (int y = ym - h; y < ym; y++) {
+        int sy = ym - (int)((ym - y) * (ym - y0) / fmaxf(hf, 1));
+        if (sy < y0) sy = y0;
+        uint16_t *d = out + y * TFT_W + x0, *sr = flipOld + sy * TFT_W + x0;
+        for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
+      }
+      for (int y = ym - h - 3; y < ym - h; y++)  // a thin shadow under its edge
+        if (y >= y0) { uint16_t *d = out + y * TFT_W + x0; for (int i = 0; i < n; i++) d[i] = shade565(d[i], 150); }
+    } else {                                 // the new bottom flap, falling from the split
+      float q = (p - 0.5f) * 2, hf = (y1 - ym) * sinf(q * 1.5707963f);
+      int h = (int)hf, k8 = (int)(256 * (0.55f + 0.45f * q));
+      for (int y = ym; y < ym + h; y++) {
+        int sy = ym + (int)((y - ym) * (y1 - ym) / fmaxf(hf, 1));
+        if (sy >= y1) sy = y1 - 1;
+        uint16_t *d = out + y * TFT_W + x0, *sr = dialBuf + sy * TFT_W + x0;
+        for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
+      }
+    }
+  }
+}
+
+// Visual chimes: rings of light from the middle in the face's colour. Quarter past: one soft ring, half past: two,
+// quarter to: three; on the hour four, then one strong ring for each hour (3 o'clock: three).
+struct Pulse { uint32_t at; float strength; };
+static Pulse pulses[20];
+static int nPulses = 0;
+static uint32_t chimeEnd = 0;
+static const uint32_t RING_MS = 1700;
+static void startChime(int quarters, int strikes) {
+  uint32_t t = millis() + 200;
+  nPulses = 0;
+  for (int i = 0; i < quarters && nPulses < 20; i++) pulses[nPulses++] = {t + i * 480u, 0.55f};
+  uint32_t s0 = t + quarters * 480u + 700;
+  for (int i = 0; i < strikes && nPulses < 20; i++) pulses[nPulses++] = {s0 + i * 1150u, 1.0f};
+  chimeEnd = (nPulses ? pulses[nPulses - 1].at + RING_MS : t) | 1;
+}
+static void chimeNow(int minute, int hour24) {
+  int q = minute / 15;
+  startChime(q ? q : 4, q ? 0 : (hour24 + 11) % 12 + 1);
+}
+static void drawChime(uint16_t *out, uint32_t now, uint32_t rgb) {
+  if ((int32_t)(now - chimeEnd) >= 0) { chimeEnd = 0; return; }
+  float cr = (rgb >> 16) & 255, cg = (rgb >> 8) & 255, cb = rgb & 255;
+  if (cr * 0.3f + cg * 0.59f + cb * 0.11f > 100) {   // a light colour: lighter still, so it shows on its own face
+    cr += (255 - cr) * 0.45f; cg += (255 - cg) * 0.45f; cb += (255 - cb) * 0.45f;
+  }
+  const float cx = TFT_W / 2.0f, cy = TFT_H / 2.0f;
+  for (int i = 0; i < nPulses; i++) {
+    int32_t age = (int32_t)(now - pulses[i].at);
+    if (age < 0 || age >= (int32_t)RING_MS) continue;
+    float t = age / (float)RING_MS, e = 1 - (1 - t) * (1 - t);
+    float R = 16 + 330 * e, w = 9 + 14 * pulses[i].strength;
+    float a0 = fminf(1, pulses[i].strength * 0.95f) * powf(1 - t, 1.3f);
+    int ya = max(0, (int)(cy - R - w)), yb = min(TFT_H - 1, (int)(cy + R + w));
+    for (int y = ya; y <= yb; y++) {
+      float dy = y + 0.5f - cy, ro = (R + w) * (R + w) - dy * dy;
+      if (ro <= 0) continue;
+      float ri = (R - w) > 0 ? (R - w) * (R - w) - dy * dy : -1;
+      int xo = (int)sqrtf(ro) + 1, xi = ri > 0 ? (int)sqrtf(ri) : 0;
+      for (int side = -1; side <= 1; side += 2) {          // the two spans of the ring on this row
+        int from = side < 0 ? (int)cx - xo : (int)cx + xi, to = side < 0 ? (int)cx - xi - 1 : (int)cx + xo;
+        from = max(0, from); to = min(TFT_W - 1, to);
+        uint16_t *row = out + y * TFT_W;
+        for (int x = from; x <= to; x++) {
+          float dx = x + 0.5f - cx, d = fabsf(sqrtf(dx * dx + dy * dy) - R) / w;
+          if (d >= 1) continue;
+          float a = a0 * (1 - d) * (1 - d);
+          uint16_t c = row[x];
+          float r = ((c >> 11) & 31) * (255.0f / 31), g = ((c >> 5) & 63) * (255.0f / 63), b = (c & 31) * (255.0f / 31);
+          r += (cr - r) * a; g += (cg - g) * a; b += (cb - b) * a;
+          row[x] = (((int)r & 0xF8) << 8) | (((int)g & 0xFC) << 3) | ((int)b >> 3);
+        }
+      }
+    }
+  }
+}
+static int clockTest = 0;                    // asked from the settings page: 1 flip, 2..5 chime at :15 :30 :45 :00
+
 static void clockTick() {
   if (!dialBuf || !clkBuf) return;
   time_t now = time(nullptr);
@@ -895,7 +1011,10 @@ static void clockTick() {
   }
   if (dialReady) {
     if (dialReqKey == key) {                           // a new dial is done and it's time for it: swap it in
+      bool flip = flipOld && clk::isFlip(dialReq.face) && dialFace == dialReq.face;
+      if (flip) memcpy(flipOld, dialBuf, (size_t)TFT_W * TFT_H * 2);
       std::swap(dialBuf, dialBack);
+      if (flip) startFlip();
       dialKey = dialReqKey;
       dialFace = dialReq.face;
       dialReady = false;
@@ -919,15 +1038,49 @@ static void clockTick() {
   }
   if (dialFace < 0) return;                            // the first dial isn't ready yet
   const int face = dialFace;                                     // hands to match the dial on show
+  // chimes on the hour and the quarters (in the clock's day hours, or while a tap shows it)
+  static int chimedAt = -1;
+  int qm = t.tm_hour * 60 + t.tm_min;
+  if (S.chimes && t.tm_min % 15 == 0 && t.tm_sec < 5 && qm != chimedAt && (clockPeekUntil || inSchedule())) {
+    chimedAt = qm;
+    if (t.tm_min == 0 || S.chimes == 2) chimeNow(t.tm_min, t.tm_hour);
+  }
+  if (clockTest && face == S.face && !dialBusy) {      // a test from the settings page
+    if (clockTest == 1 && clk::isFlip(face) && flipOld && baseBuf) {
+      // the minute before, drawn on fresh cards (the kept base has them without digits)
+      memcpy(flipOld, dialBuf, (size_t)TFT_W * TFT_H * 2);
+      for (int k = 0; k < 2; k++) {
+        int x0, y0, x1, y1;
+        clk::flipCard(k, x0, y0, x1, y1);
+        for (int y = y0; y < y1; y++) memcpy(flipOld + y * TFT_W + x0, baseBuf + y * TFT_W + x0, (x1 - x0) * 2);
+      }
+      int pm = (qm + 1439 - 60 - 1) % 1440;          // an hour and a minute ago: both cards flip
+      clk::drawMinuteLayer(flipOld, face, pm / 60, pm % 60);
+      startFlip();
+    } else if (clockTest >= 2) {
+      static const int mins[4] = {15, 30, 45, 0};
+      chimeNow(mins[clockTest - 2], t.tm_hour);
+    }
+    clockTest = 0;
+  }
+  uint32_t ms = millis();
+  bool anim = flipAt || chimeEnd;
+  static uint32_t animAt = 0;
+  static bool wasAnim = false;
+  bool animFrame = anim && ms - animAt >= 40;
   const bool secs = S.secs && clk::faceHasSeconds(face);         // Advent shows minutes only
   int bri = clockBri();
   static int briShown = -1;
   if (bri != briShown) { briShown = bri; clockForce = true; }
   int32_t stamp = (t.tm_hour * 60 + t.tm_min) * 60 + (secs ? t.tm_sec : 0);
-  if (stamp == clockStamp && !clockForce) return;
+  if (stamp == clockStamp && !clockForce && !animFrame && !(wasAnim && !anim)) return;
   clockStamp = stamp;
   clockForce = false;
+  wasAnim = anim;
+  if (anim) animAt = ms;
   memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
+  if (flipAt) drawFlip(clkBuf, ms);
+  if (chimeEnd) drawChime(clkBuf, ms, clk::chimeColor(face));
   float hh, mm;
   handTimes(t, hh, mm);
   clk::drawSecondLayer(clkBuf, face, hh, mm, t.tm_sec, secs);   // the minute layer is in the dial
@@ -1250,7 +1403,9 @@ static const char PAGE_HEAD[] PROGMEM =
     "<title>Matrixinator</title><style>body{font:15px system-ui;background:#0a0e15;color:#dde;max-width:560px;margin:auto;padding:16px}"
     "h1{font-size:22px}fieldset{border:1px solid #334;border-radius:8px;margin:12px 0;padding:10px 12px}label{display:block;margin:8px 0}"
     "input[type=text],input[type=password],input[type=number]{width:100%;box-sizing:border-box;padding:7px;background:#141a24;color:#fff;border:1px solid #334;border-radius:6px}"
-    "button{padding:8px 16px;border-radius:6px;border:0;background:#00b6ff;color:#012;font-weight:600}.note{color:#889;font-size:13px}</style></head><body>";
+    "button{padding:8px 16px;border-radius:6px;border:0;background:#00b6ff;color:#012;font-weight:600}.note{color:#889;font-size:13px}"
+    ".savebar{position:sticky;bottom:0;z-index:5;background:#0a0e15;padding:10px 0 12px;border-top:1px solid #334;margin-top:8px}"
+    ".tests{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}.tests button{padding:6px 11px}</style></head><body>";
 
 // Settings page: the digital faces' colour controls. The preview is tinted here in the browser from two
 // built-in pictures (base + mask; see tools/preview/make_previews.py), so trying colours costs the screen nothing.
@@ -1402,6 +1557,19 @@ static void handleRoot() {
        "<p class=note>Now " + nowText() + ". With the screen off at night, a tap shows the clock for 30 s. "
        "The backlight can't dim on this board, so a dimmed clock still has a faint glow behind black.</p>"
        "<button type=button onclick=\"fetch('/api/clock?preview=30',{method:'POST'})\">Show the clock for 30 s</button>"
+       "<label>Chimes<select name=chime>"
+       "<option value=0" + String(S.chimes == 0 ? " selected" : "") + ">Off</option>"
+       "<option value=1" + (S.chimes == 1 ? " selected" : "") + ">On the hour</option>"
+       "<option value=2" + (S.chimes == 2 ? " selected" : "") + ">On the hour and the quarters</option></select></label>"
+       "<p class=note>Rings of light from the middle of the clock, in the face's colour: one at quarter past, two at "
+       "half past, three at quarter to; on the hour four, then one strong ring for each hour. Only in the day hours.</p>"
+       "<div class=tests><span class=note>Try it on the screen (the saved face):</span> "
+       "<button type=button data-t=chime15>:15</button><button type=button data-t=chime30>:30</button>"
+       "<button type=button data-t=chime45>:45</button><button type=button data-t=chime00>Hour</button>"
+       "<button type=button data-t=flip>Flip</button> <span id=tmsg class=note></span></div>"
+       "<script>document.querySelectorAll('[data-t]').forEach(function(b){b.onclick=function(){var m=document.getElementById('tmsg');"
+       "m.textContent='';fetch('/api/clock',{method:'POST',body:JSON.stringify({test:b.dataset.t})}).then(function(r){return r.json()})"
+       ".then(function(j){m.textContent=j.error||'Showing on the screen'}).catch(function(){m.textContent='No answer'})}})</script>"
        "</fieldset>"
        "<fieldset><legend>Home Assistant weather</legend>"
        "<label><input type=checkbox name=ha " + String(S.ha ? "checked" : "") + "> Show temperature, humidity and pressure on the clock</label>"
@@ -1434,7 +1602,7 @@ static void handleRoot() {
        "<label>Network<input type=text name=ssid value=\"" + esc(S.ssid) + "\"></label>"
        "<label>Password<input type=password name=pass placeholder='" + (S.pass.length() ? "saved; type to change" : "") + "'></label>"
        "<label>Host name<input type=text name=host value=\"" + esc(S.host) + "\"></label></fieldset>"
-       "<button>Save</button></form>"
+       "<div class=savebar><button>Save</button> <span class=note>Saves every section above.</span></div></form>"
        "<form method=post action=/update enctype=multipart/form-data><fieldset><legend>Update firmware</legend>"
        "<input type=file name=update accept=.bin> <button>Upload</button>"
        "<p class=note>Or use Lickety Split to update over Wi-Fi.</p></fieldset></form>";
@@ -1476,6 +1644,7 @@ static void handleSettings() {
     S.clkOff = parseHhmm(web.arg("coff"), S.clkOff);
     if (web.hasArg("cbri")) S.clkBri = constrain(web.arg("cbri").toInt(), 10, 255);
     if (web.hasArg("night")) S.night = constrain(web.arg("night").toInt(), 0, 1);
+    if (web.hasArg("chime")) S.chimes = constrain(web.arg("chime").toInt(), 0, 2);
     if (web.hasArg("boot")) S.bootSecs = constrain(web.arg("boot").toInt(), 0, 120);
     if (web.hasArg("nbri")) S.nightBri = constrain(web.arg("nbri").toInt(), 5, 255);
     if (web.hasArg("tz") && web.arg("tz").length() && web.arg("tz") != S.tz) { S.tz = web.arg("tz").substring(0, 60); tzChanged = true; }
@@ -1665,6 +1834,17 @@ static void setupWeb() {
         }
       }
       if (save) { saveSettings(); clockForce = true; }
+      String test = in["test"] | "";                    // "flip", "chime15", "chime30", "chime45", "chime00"
+      if (test.length()) {
+        int tc = test == "flip" ? 1 : test == "chime15" ? 2 : test == "chime30" ? 3 : test == "chime45" ? 4 : test == "chime00" ? 5 : 0;
+        if (!tc) { web.send(400, "application/json", "{\"error\":\"Unknown test\"}"); return; }
+        if (tc == 1 && !clk::isFlip(S.face)) {
+          web.send(409, "application/json", "{\"error\":\"Pick the Flip face and Save first.\"}");
+          return;
+        }
+        clockTest = tc;
+        if (pv < 15) pv = 15;                            // the clock on the screen for a while to see it
+      }
       if (pv > 0) {
         if (!S.mode) { S.mode = 1; saveSettings(); }   // a preview needs a clock mode
         clockPeekUntil = millis() + (uint32_t)constrain(pv, 1, 3600) * 1000;
@@ -1737,6 +1917,7 @@ void setup() {
     if (xTaskGetCurrentTaskHandle() == dialTaskH && millis() - at > 50) { at = millis(); vTaskDelay(1); }
   });
   clkBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+  flipOld = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
   layout();
