@@ -1127,6 +1127,8 @@ static void holidayMarkers(uint16_t *buf, int face) {
 // they're all open; the rest of the year they're all shut. The banner at the top: the time (drawn by drawHands)
 // and the countdown.
 static const int ADVENT_ORDER[24] = {13, 5, 21, 9, 1, 17, 22, 10, 3, 15, 24, 7, 6, 19, 12, 23, 2, 16, 18, 4, 14, 8, 20, 11};
+// What's behind each door (1..24): all different; the star on Christmas Eve, the tree the day before.
+static const int DOOR_ICON[25] = {0, 5, 9, 4, 14, 2, 11, 16, 3, 13, 17, 6, 20, 8, 22, 10, 19, 12, 18, 21, 23, 7, 15, 1, 0};
 static void adventIcon(uint16_t *buf, int kind, float x, float y) {
   Shape a, b, c;
   switch (kind) {
@@ -1187,6 +1189,246 @@ static void adventIcon(uint16_t *buf, int kind, float x, float y) {
       fill(buf, b, {214, 34, 44});
       break;
     }
+    case 6: {  // bell
+      Shape body, clap, bow;
+      body.ell(x, y - 2, 11, 13);
+      float bx[4] = {x - 15, x + 15, x + 9, x - 9}, by[4] = {y + 12, y + 12, y - 2, y - 2};
+      body.poly(bx, by, 4);
+      clap.disc(x, y + 15, 4);
+      bow.ell(x - 6, y - 17, 6, 3.5f, -0.4f); bow.ell(x + 6, y - 17, 6, 3.5f, 0.4f); bow.disc(x, y - 16, 3);
+      fill(buf, clap, {150, 110, 40});
+      fill(buf, body, {120, 80, 20}, 1, 1);
+      fill(buf, body, {244, 200, 80});
+      fill(buf, bow, {214, 34, 44});
+      break;
+    }
+    case 7: {  // candle
+      a.box(x, y + 8, 7, 14, 2);
+      b.ell(x, y - 13, 4.5f, 8);
+      c.ell(x, y - 11, 2.2f, 4);
+      Shape wick, holly;
+      wick.seg(x, y - 6, x, y - 3, 1);
+      holly.ell(x - 9, y + 21, 7, 3.5f, 0.3f); holly.ell(x + 9, y + 21, 7, 3.5f, -0.3f);
+      fill(buf, b, {255, 200, 60}, 0.5f, 3, 6);
+      fill(buf, a, {214, 34, 44});
+      fill(buf, wick, {40, 30, 20});
+      fill(buf, b, {255, 190, 60});
+      fill(buf, c, {255, 250, 210});
+      fill(buf, holly, {40, 150, 70});
+      Shape berry; berry.disc(x, y + 20, 3); fill(buf, berry, {230, 40, 40});
+      break;
+    }
+    case 8: {  // stocking
+      a.box(x - 2, y - 2, 8, 14, 2);
+      a.ell(x + 4, y + 13, 12, 8);
+      b.box(x - 2, y - 16, 11, 5, 2.5f);
+      fill(buf, a, {214, 34, 44});
+      fill(buf, b, {250, 250, 250});
+      Shape stripe; stripe.box(x - 2, y + 2, 8, 2, 0);
+      fill(buf, stripe, {40, 150, 70});
+      break;
+    }
+    case 9: {  // snowman
+      a.disc(x, y + 10, 12);
+      a.disc(x, y - 8, 8.5f);
+      b.box(x, y - 19, 6, 5, 1); b.box(x, y - 14.5f, 9, 1.5f, 0.5f);
+      float nx[3] = {x, x + 10, x}, ny[3] = {y - 9.5f, y - 7.5f, y - 5.5f};
+      c.poly(nx, ny, 3);
+      Shape dots; dots.disc(x - 3, y - 10, 1.4f); dots.disc(x + 3, y - 10, 1.4f);
+      dots.disc(x, y + 5, 1.6f); dots.disc(x, y + 11, 1.6f);
+      fill(buf, a, {250, 252, 255});
+      fill(buf, b, {30, 30, 36});
+      fill(buf, c, {250, 140, 30});
+      fill(buf, dots, {30, 30, 36});
+      break;
+    }
+    case 10: {  // gingerbread man
+      a.disc(x, y - 13, 7.5f);
+      a.ell(x, y + 3, 8, 10);
+      a.seg(x - 6, y - 2, x - 15, y + 4, 3.6f); a.seg(x + 6, y - 2, x + 15, y + 4, 3.6f);
+      a.seg(x - 4, y + 10, x - 9, y + 21, 4); a.seg(x + 4, y + 10, x + 9, y + 21, 4);
+      Shape ice; ice.disc(x - 2.8f, y - 14, 1.3f); ice.disc(x + 2.8f, y - 14, 1.3f);
+      ice.disc(x, y, 1.6f); ice.disc(x, y + 6, 1.6f);
+      ice.seg(x - 3, y - 9.5f, x + 3, y - 9.5f, 0.9f);
+      fill(buf, a, {176, 100, 40});
+      fill(buf, ice, {255, 255, 255});
+      break;
+    }
+    case 11: {  // holly
+      a.ell(x - 9, y - 2, 13, 6, 0.5f);
+      a.ell(x + 9, y - 2, 13, 6, -0.5f);
+      a.ell(x, y + 10, 6, 12);
+      b.disc(x - 4, y - 6, 4); b.disc(x + 4, y - 6, 4); b.disc(x, y - 12, 4);
+      c.disc(x - 5, y - 8, 1.2f); c.disc(x + 3, y - 8, 1.2f); c.disc(x - 1, y - 14, 1.2f);
+      fill(buf, a, {20, 90, 40}, 1, 1);
+      fill(buf, a, {40, 150, 70});
+      fill(buf, b, {214, 34, 44});
+      fill(buf, c, {255, 255, 255}, 0.7f);
+      break;
+    }
+    case 12: {  // wreath
+      for (int i = 0; i < 12; i++) { float an = i * PI2 / 12; a.disc(x + 13 * sinf(an), y + 2 - 13 * cosf(an), 6.5f); }
+      for (int i = 0; i < 5; i++) { float an = i * PI2 / 5 + 0.4f; c.disc(x + 13 * sinf(an), y + 2 - 13 * cosf(an), 2.2f); }
+      b.ell(x - 6, y + 16, 6, 3.5f, -0.4f); b.ell(x + 6, y + 16, 6, 3.5f, 0.4f); b.disc(x, y + 16, 3);
+      fill(buf, a, {24, 110, 50});
+      fill(buf, c, {230, 40, 40});
+      fill(buf, b, {214, 34, 44});
+      break;
+    }
+    case 13: {  // mitten
+      a.ell(x + 2, y - 2, 11, 14);
+      a.ell(x - 10, y + 2, 4.5f, 8, -0.5f);
+      b.box(x + 1, y + 15, 11, 5, 2);
+      fill(buf, a, {60, 110, 210});
+      fill(buf, b, {250, 250, 250});
+      Shape flake;
+      for (int k = 0; k < 3; k++) { float an = k * PI2 / 6; flake.seg(x + 2 - sinf(an) * 5, y - 3 - cosf(an) * 5, x + 2 + sinf(an) * 5, y - 3 + cosf(an) * 5, 0.9f); }
+      fill(buf, flake, {255, 255, 255});
+      break;
+    }
+    case 14: {  // hot cocoa
+      a.box(x - 3, y + 6, 12, 13, 3);
+      b.disc(x + 11, y + 6, 7);
+      Shape hole; hole.disc(x + 11, y + 6, 3.6f);
+      c.box(x - 3, y - 6, 10, 2, 1);
+      Shape steam;
+      for (int k = -1; k <= 1; k++) { steam.seg(x - 3 + k * 5, y - 11, x - 1 + k * 5, y - 16, 1.1f); steam.seg(x - 1 + k * 5, y - 16, x - 3 + k * 5, y - 21, 1.1f); }
+      Shape mallow; mallow.box(x - 6, y - 7, 3, 2.5f, 1); mallow.box(x + 1, y - 7.5f, 3, 2.5f, 1);
+      fill(buf, b, {214, 34, 44});
+      fill(buf, hole, {48, 22, 14});
+      fill(buf, a, {214, 34, 44});
+      fill(buf, c, {110, 60, 30});
+      fill(buf, mallow, {255, 255, 255});
+      fill(buf, steam, {255, 255, 255}, 0.6f);
+      break;
+    }
+    case 15: {  // Santa hat
+      float hx[3] = {x - 14, x + 13, x + 10}, hy[3] = {y + 10, y + 10, y - 17};
+      a.poly(hx, hy, 3);
+      a.seg(x + 10, y - 17, x + 16, y - 6, 3);
+      b.box(x, y + 13, 17, 5, 4);
+      c.disc(x + 16, y - 5, 5);
+      fill(buf, a, {214, 34, 44});
+      fill(buf, b, {250, 250, 250});
+      fill(buf, c, {250, 250, 250});
+      break;
+    }
+    case 16: {  // reindeer
+      Shape ant;
+      for (int sd = -1; sd <= 1; sd += 2) {
+        ant.seg(x + sd * 5, y - 10, x + sd * 12, y - 22, 1.8f);
+        ant.seg(x + sd * 9, y - 16, x + sd * 16, y - 16, 1.6f);
+        ant.seg(x + sd * 11, y - 20, x + sd * 7, y - 24, 1.5f);
+        a.ell(x + sd * 11, y - 6, 5, 2.6f, sd * 0.5f);
+      }
+      a.ell(x, y + 2, 10, 13);
+      b.disc(x, y + 13, 4.5f);
+      c.disc(x - 4, y - 2, 1.6f); c.disc(x + 4, y - 2, 1.6f);
+      fill(buf, ant, {170, 120, 60});
+      fill(buf, a, {140, 84, 40});
+      fill(buf, c, {20, 14, 10});
+      fill(buf, b, {230, 30, 30}, 0.5f, 2, 4);
+      fill(buf, b, {240, 40, 40});
+      break;
+    }
+    case 17: {  // gingerbread house
+      a.box(x, y + 9, 14, 11, 1);
+      float rx[3] = {x - 19, x + 19, x}, ry[3] = {y, y, y - 18};
+      b.poly(rx, ry, 3);
+      c.box(x, y + 14, 4, 6, 2);
+      Shape ice, drops;
+      ice.seg(x - 19, y, x, y - 18, 1.6f); ice.seg(x, y - 18, x + 19, y, 1.6f);
+      drops.disc(x - 8, y + 4, 2); drops.disc(x + 8, y + 4, 2); drops.disc(x, y - 7, 2.4f);
+      fill(buf, a, {176, 100, 40});
+      fill(buf, b, {150, 80, 30});
+      fill(buf, ice, {255, 255, 255});
+      fill(buf, c, {100, 50, 20});
+      Shape win; win.box(x - 8, y + 6, 3, 3, 0.5f); win.box(x + 8, y + 6, 3, 3, 0.5f);
+      fill(buf, win, {255, 220, 100});
+      fill(buf, drops, {214, 34, 44});
+      break;
+    }
+    case 18: {  // sugar cookie with sprinkles
+      a.disc(x, y, 16);
+      b.disc(x, y, 12.5f);
+      static const C3 sp[4] = {{214, 34, 44}, {40, 150, 70}, {250, 210, 90}, {80, 140, 230}};
+      for (int i = 0; i < 10; i++) {
+        float an = i * 2.4f, r = 3 + (i * 37 % 9);
+        Shape s1; float px1 = x + r * sinf(an), py1 = y - r * cosf(an);
+        s1.seg(px1 - 1.8f * cosf(an * 1.7f), py1 - 1.8f * sinf(an * 1.7f), px1 + 1.8f * cosf(an * 1.7f), py1 + 1.8f * sinf(an * 1.7f), 0.9f);
+        if (i == 0) { fill(buf, a, {210, 160, 90}); fill(buf, b, {250, 236, 240}); }
+        fill(buf, s1, sp[i % 4]);
+      }
+      break;
+    }
+    case 19: {  // drum
+      a.box(x, y + 5, 15, 11, 2);
+      b.ell(x, y - 6, 15, 4.5f);
+      Shape zz;
+      for (int i = 0; i < 5; i++) zz.seg(x - 15 + i * 6, y + (i % 2 ? 13 : -3), x - 9 + i * 6, y + (i % 2 ? -3 : 13), 1);
+      c.seg(x - 16, y - 20, x - 4, y - 8, 1.4f); c.seg(x + 16, y - 20, x + 4, y - 8, 1.4f);
+      c.disc(x - 16, y - 20, 2.6f); c.disc(x + 16, y - 20, 2.6f);
+      fill(buf, a, {214, 34, 44});
+      fill(buf, zz, {250, 210, 90});
+      fill(buf, b, {236, 230, 214});
+      fill(buf, c, {200, 160, 100});
+      break;
+    }
+    case 20: {  // teddy bear
+      a.disc(x - 10, y - 11, 5); a.disc(x + 10, y - 11, 5);
+      a.disc(x, y - 2, 13);
+      b.ell(x, y + 4, 6.5f, 5);
+      c.disc(x - 4.5f, y - 5, 1.6f); c.disc(x + 4.5f, y - 5, 1.6f); c.disc(x, y + 2, 2);
+      Shape inner; inner.disc(x - 10, y - 11, 2.4f); inner.disc(x + 10, y - 11, 2.4f);
+      Shape bow; bow.ell(x - 5, y + 14, 5, 3, -0.4f); bow.ell(x + 5, y + 14, 5, 3, 0.4f); bow.disc(x, y + 14, 2.2f);
+      fill(buf, a, {160, 104, 56});
+      fill(buf, inner, {220, 170, 120});
+      fill(buf, b, {226, 186, 140});
+      fill(buf, c, {30, 20, 14});
+      fill(buf, bow, {214, 34, 44});
+      break;
+    }
+    case 21: {  // penguin
+      a.ell(x, y + 2, 12, 17);
+      a.disc(x, y - 12, 8.5f);
+      b.ell(x, y + 5, 7.5f, 12);
+      b.ell(x, y - 11, 5.5f, 5);
+      float kx[3] = {x - 3, x + 3, x}, ky[3] = {y - 9, y - 9, y - 5};
+      c.poly(kx, ky, 3);
+      c.ell(x - 5, y + 19, 4.5f, 2); c.ell(x + 5, y + 19, 4.5f, 2);
+      Shape eyes; eyes.disc(x - 2.5f, y - 13, 1.2f); eyes.disc(x + 2.5f, y - 13, 1.2f);
+      Shape scarf; scarf.box(x, y - 3.5f, 9, 2.2f, 1); scarf.box(x + 5, y + 1, 2, 5, 1);
+      fill(buf, a, {150, 150, 170}, 1, 1.2f);
+      fill(buf, a, {26, 26, 34});
+      fill(buf, b, {250, 250, 250});
+      fill(buf, eyes, {20, 20, 24});
+      fill(buf, c, {250, 150, 30});
+      fill(buf, scarf, {214, 34, 44});
+      break;
+    }
+    case 22: {  // crescent moon and stars
+      a.disc(x - 2, y, 15);
+      b.disc(x + 5, y - 5, 13);
+      fill(buf, a, {250, 230, 140});
+      fill(buf, b, {48, 22, 14});
+      for (int i = 0; i < 3; i++) {
+        static const float st[3][3] = {{11, -12, 4}, {15, 6, 3}, {5, 15, 2.6f}};
+        Shape s1; star(s1, Frame(x + st[i][0], y + st[i][1], 0, st[i][2]));
+        fill(buf, s1, {255, 240, 170});
+      }
+      break;
+    }
+    case 23: {  // wrapped sweet
+      a.ell(x, y, 11, 8);
+      float lx[3] = {x - 9, x - 21, x - 21}, ly[3] = {y, y - 9, y + 9};
+      float rx[3] = {x + 9, x + 21, x + 21}, ry[3] = {y, y - 9, y + 9};
+      b.poly(lx, ly, 3); b.poly(rx, ry, 3);
+      Shape st; st.seg(x - 5, y - 7, x - 1, y + 7, 1.6f); st.seg(x + 2, y - 7, x + 6, y + 7, 1.6f);
+      fill(buf, b, {120, 60, 200});
+      fill(buf, a, {170, 100, 240});
+      fill(buf, st, {255, 255, 255}, 0.85f);
+      break;
+    }
     default: {  // snowflake
       for (int k = 0; k < 3; k++) {
         float an = k * PI2 / 6, dx = sinf(an) * 17, dy = cosf(an) * 17;
@@ -1238,7 +1480,7 @@ static void advent(uint16_t *buf, const Dial &d) {
       fill(buf, hinge, col);
       text(small, num, cx + dw / 2 - 12, cy + dh / 2 - 10, 9, 1.6f, 1.6f);
       fill(buf, small, {244, 214, 120});
-      adventIcon(buf, n % 6, cx + 3, cy - 2);
+      adventIcon(buf, DOOR_ICON[n], cx + 3, cy - 2);
     } else {
       Shape inner, t;
       inner.box(cx, cy, dw / 2 - 5, dh / 2 - 5, 4);
