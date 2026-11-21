@@ -979,14 +979,35 @@ static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float
 // Big HH:MM across the middle, the date above, the weather and the moon below. The still parts (panel, unlit
 // segments, tubes, cards) are the base; the lit digits are drawn every tick by drawHands.
 struct Digi { C3 on, glow, ghost, text, dim; };
-static const Digi DIGI[4] = {
-    {{255, 44, 28}, {255, 20, 10}, {44, 7, 6}, {230, 46, 34}, {140, 26, 20}},          // Red LED
-    {{120, 255, 176}, {50, 255, 140}, {12, 40, 28}, {108, 238, 164}, {56, 140, 98}},   // VFD: green-cyan phosphor
-    {{255, 150, 60}, {255, 90, 20}, {64, 42, 32}, {255, 164, 96}, {170, 110, 70}},     // Nixie
-    {{238, 238, 232}, {0, 0, 0}, {0, 0, 0}, {206, 206, 200}, {130, 130, 130}},         // Flip
-};
-static const Digi &digi(int f) { return DIGI[f - F_LED]; }
+// The lit colour of each digital face (settable); everything else on the face is worked out from it, as
+// k * colour + a fixed part, so the settings page can tint a preview without asking the screen.
+static const uint32_t DIGIT_DEFAULT[4] = {0xFF2C1C, 0x78FFB0, 0xFF963C, 0xEEEEE8};   // Red LED, VFD, Nixie, Flip
+static uint32_t digitRGB[4] = {0xFF2C1C, 0x78FFB0, 0xFF963C, 0xEEEEE8};
+static float digitGlow[4] = {1, 1, 1, 1}, digitUnlit[4] = {1, 1, 1, 1};   // 1 = as designed
+static C3 digitC3(int f) {
+  uint32_t v = digitRGB[f - F_LED];
+  return {(float)((v >> 16) & 255), (float)((v >> 8) & 255), (float)(v & 255)};
+}
+static Digi digi(int f) {
+  C3 on = digitC3(f);
+  switch (f) {
+    case F_NIXIE: return {on, on, {64, 42, 32}, mix(on, {255, 255, 255}, 0.15f), mul(on, 0.66f)};   // ghost: tube wire
+    case F_FLIP: return {on, {0, 0, 0}, {0, 0, 0}, mul(on, 0.87f), mul(on, 0.55f)};
+    default: return {on, on, mul(on, 0.17f * digitUnlit[f - F_LED]), mul(on, 0.91f), mul(on, 0.55f)};  // Red LED, VFD
+  }
+}
 static bool isDigital(int f) { return f >= F_LED && f <= F_FLIP; }
+uint32_t digitColor(int f) { return isDigital(f) ? digitRGB[f - F_LED] : 0; }
+uint32_t defaultDigitColor(int f) { return isDigital(f) ? DIGIT_DEFAULT[f - F_LED] : 0; }
+void setDigitColor(int f, uint32_t rgb) { if (isDigital(f)) digitRGB[f - F_LED] = rgb & 0xFFFFFF; }
+void setDigitLevels(int f, int glowPct, int unlitPct) {
+  if (!isDigital(f)) return;
+  digitGlow[f - F_LED] = (glowPct < 0 ? 0 : glowPct > 200 ? 200 : glowPct) / 100.0f;
+  digitUnlit[f - F_LED] = (unlitPct < 0 ? 0 : unlitPct > 300 ? 300 : unlitPct) / 100.0f;
+}
+int digitGlowPct(int f) { return isDigital(f) ? (int)lroundf(digitGlow[f - F_LED] * 100) : 0; }
+int digitUnlitPct(int f) { return isDigital(f) ? (int)lroundf(digitUnlit[f - F_LED] * 100) : 0; }
+static float glowOf(int f) { return isDigital(f) ? digitGlow[f - F_LED] : 1; }
 
 // The 4 big digit boxes and the colon between them
 static const float DX[4] = {31, 133, 263, 365}, DY = 96, DW = 84, DH = 170;
@@ -1028,8 +1049,9 @@ static void colonDots(Shapes &v, float cx, float y, float h, float r, float slan
   add(v).disc(cx - (h * 0.18f) * slant, y + h * 0.68f, r);
 }
 
+static float glowNow = 1;                                  // the glow strength of the face being drawn
 static void glowFill(uint16_t *buf, const Shapes &v, const Digi &c, float soft) {
-  fillAll(buf, v, c.glow, 0.55f, 3, soft);
+  if (glowNow > 0) fillAll(buf, v, c.glow, fminf(1, 0.55f * glowNow), 3, soft);
   fillAll(buf, v, c.on);
 }
 
@@ -1039,7 +1061,7 @@ static void digitalBase(uint16_t *buf, int f) {
     Shape panel;
     panel.box(CX, 214, 228, 136, 18);
     fill(buf, panel, {0, 0, 0}, 0.5f, 2, 8, 0, 4);
-    fill(buf, panel, f == F_LED ? C3{24, 4, 4} : C3{4, 16, 18});
+    fill(buf, panel, mul(c.on, 0.08f));
     Shape shine;
     shine.box(CX, 86, 214, 3, 3);
     fill(buf, shine, {255, 255, 255}, 0.06f);
@@ -1087,6 +1109,7 @@ static void digitalBase(uint16_t *buf, int f) {
 // Second layer (quick, every tick): blinking colon, seconds, AM/PM.
 static void digitalMinute(uint16_t *buf, int f, int h24, int m) {
   const Digi &c = digi(f);
+  glowNow = glowOf(f);
   int h12 = (h24 + 11) % 12 + 1;
   if (f == F_LED || f == F_VFD) {
     Shapes on;
@@ -1102,9 +1125,9 @@ static void digitalMinute(uint16_t *buf, int f, int h24, int m) {
       char s1[2] = {d[i], 0};
       Shapes g;
       text(g, s1, DX[i] + DW / 2, DY + DH / 2, 150, 7);
-      fillAll(buf, g, c.glow, 0.6f, 3, 12);
+      if (glowNow > 0) fillAll(buf, g, c.glow, fminf(1, 0.6f * glowNow), 3, 12);
       fillAll(buf, g, c.on);
-      fillAll(buf, g, {255, 226, 180}, 1, -2.2f);
+      fillAll(buf, g, mix(c.on, {255, 255, 255}, 0.65f), 1, -2.2f);   // the hot core
     }
   } else {                                               // Flip
     char hs[4], ms[4];
@@ -1129,6 +1152,7 @@ static void digitalMinute(uint16_t *buf, int f, int h24, int m) {
 
 static void digitalSecond(uint16_t *buf, int f, int h24, int sec, bool showSeconds) {
   const Digi &c = digi(f);
+  glowNow = glowOf(f);
   bool colon = !showSeconds || sec % 2 == 0;               // the colon blinks with the seconds
   if (f == F_LED || f == F_VFD) {
     Shapes on;
@@ -1162,6 +1186,7 @@ static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float
 // Date above, weather and moon below.
 static void digitalInfo(uint16_t *buf, int f, const Dial &d) {
   const Digi &c = digi(f);
+  glowNow = glowOf(f);
   static const char *days[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
   static const char *mons[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
   char line[48];
@@ -1183,23 +1208,31 @@ static void digitalInfo(uint16_t *buf, int f, const Dial &d) {
   if (d.pres[0]) {
     snprintf(line, sizeof line, "%s%s%s%s", d.presWord, d.presWord[0] ? "  " : "", d.pres,
              d.presTrend > 0 ? " {" : d.presTrend < 0 ? " }" : "");
-    text(info2, line, d.moon ? 214 : CX, 428, 16, 2.4f, 1.9f);
+    text(info, line, d.moon ? 216 : CX, 428, 20, 3, 2.0f);
   }
+  (void)info2;
   if (f == F_FLIP) {
     fillAll(buf, top, c.text);
     fillAll(buf, info, c.text);
-    fillAll(buf, info2, c.dim);
   } else {
     glowFill(buf, top, {c.text, c.glow, c.ghost, c.text, c.dim}, 8);
     glowFill(buf, info, {c.text, c.glow, c.ghost, c.text, c.dim}, 8);
-    fillAll(buf, info2, c.dim);
   }
-  if (d.moon) moonDisc(buf, THEMES[f], d.moonPhase, d.pres[0] ? 400 : CX, d.pres[0] ? 428 : 430, 16);
+  if (d.moon) {
+    float mx = d.pres[0] ? 416 : CX, my = d.pres[0] ? 428 : 430;
+    float litPart = 0.5f - 0.5f * cosf(d.moonPhase * PI2);   // 0 new .. 1 full
+    Shape halo;
+    halo.disc(mx, my, 16);
+    fill(buf, halo, THEMES[f].moonLit, 0.12f + 0.3f * litPart, 2, 11);   // a soft glow, brighter when fuller
+    moonDisc(buf, THEMES[f], d.moonPhase, mx, my, 16);
+  }
 }
 
 void baseKey(const Dial &d, char *out, int n) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
   if (f == F_ADVENT) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, d.daysToXmas);   // Advent: changes daily
+  else if (isDigital(f))                                                                       // its colours
+    snprintf(out, n, "%d|%06lx|%d|%d", f, (unsigned long)digitColor(f), digitGlowPct(f), digitUnlitPct(f));
   else snprintf(out, n, "%d|%d", f, f == 3 ? (int)d.moon : 0);                   // Midnight's VI moves for the moon
 }
 void renderBase(uint16_t *buf, const Dial &d) {

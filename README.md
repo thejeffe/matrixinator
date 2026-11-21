@@ -35,7 +35,10 @@ entity ids: inside and outside temperature, inside and outside humidity, air pre
 The screen reads `GET /api/states/<entity>` every minute. Temperatures and humidity sit in IN / OUT windows
 either side of the centre; pressure (with HA's unit, e.g. 983 HPA or 29.03 INHG) in a window below 12.
 
-`GET /api/clock.jpg?face=N` is a 240x240 picture of face N with sample weather (the settings page shows it as a preview). The pictures are made ahead of time and built into the firmware: after changing a face, run `tools/preview/make_previews.py` (needs Pillow) to make them again.
+Digital faces (Red LED, VFD, Nixie, Flip) have a **digit colour**, **glow** (0-200 %) and **unlit segments** level
+(0-300 %, Red LED and VFD) on the settings page, each face its own; the preview follows as you change them. Or
+`POST /api/clock {"color":"#00ffe0","glow":150,"unlit":50}` for the current face.
+`GET /api/clock.jpg?face=N` is a 240x240 picture of face N with sample weather (the settings page shows it as a preview). The pictures are made ahead of time and built into the firmware: after changing a face, run `tools/preview/make_previews.py` (needs Pillow) to make them again (digital faces also get `&layer=base` and `&layer=mask`, which the page tints with the chosen colour).
 The pressure window shows a barometer word (Stormy, Rain, Change, Fair, Very dry) from the sea-level pressure
 (the reading corrected with Home Assistant's elevation, unless it's switched off) and a rising / falling arrow
 for the last 3 hours. `GET /api/clock` gives the clock's status; `POST /api/clock?preview=30` shows it for 30 s; `POST /api/clock`

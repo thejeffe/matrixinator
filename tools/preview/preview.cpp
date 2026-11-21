@@ -1,5 +1,6 @@
 // Draws every clock face to PNG files, to check how they look without flashing the screen.
 //   g++ -O2 -I../../src preview.cpp ../../src/clock.cpp -o preview && ./preview out-dir
+// ./preview out-dir RRGGBB glow% unlit%   draws the digital faces with that colour (make_previews.py uses it)
 #include "clock.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,11 @@ static void writePPM(const char *path, const uint16_t *b) {
 
 int main(int argc, char **argv) {
   const char *dir = argc > 1 ? argv[1] : ".";
+  if (argc > 4)
+    for (int f = 0; f < clk::FACE_COUNT; f++) {
+      clk::setDigitColor(f, strtoul(argv[2], nullptr, 16));
+      clk::setDigitLevels(f, atoi(argv[3]), atoi(argv[4]));
+    }
   std::vector<uint16_t> dial(clk::W * clk::H), out(clk::W * clk::H);
   const float phases[clk::FACE_COUNT] = {0.18f, 0.5f, 0.62f, 0.85f, 0.5f, 0.1f, 0.7f, 0.3f, 0.45f, 0.9f, 0.62f};
   for (int f = 0; f < clk::FACE_COUNT; f++) {

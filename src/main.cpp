@@ -95,6 +95,11 @@ static void loadSettings() {
   S.haToken = prefs.getString("hatok", "");
   for (int i = 0; i < 5; i++) S.haEnt[i] = prefs.getString(HA_KEYS[i], "");
   S.haSea = prefs.getBool("hasea", true);
+  for (int f = 0; f < clk::FACE_COUNT; f++) {   // digital faces: colour, glow, unlit level
+    if (!clk::defaultDigitColor(f)) continue;
+    clk::setDigitColor(f, prefs.getUInt(("dc" + String(f)).c_str(), clk::defaultDigitColor(f)));
+    clk::setDigitLevels(f, prefs.getInt(("dg" + String(f)).c_str(), 100), prefs.getInt(("du" + String(f)).c_str(), 100));
+  }
   prefs.end();
 }
 static void saveSettings() {
@@ -124,6 +129,12 @@ static void saveSettings() {
   prefs.putString("hatok", S.haToken);
   for (int i = 0; i < 5; i++) prefs.putString(HA_KEYS[i], S.haEnt[i]);
   prefs.putBool("hasea", S.haSea);
+  for (int f = 0; f < clk::FACE_COUNT; f++) {
+    if (!clk::defaultDigitColor(f)) continue;
+    prefs.putUInt(("dc" + String(f)).c_str(), clk::digitColor(f));
+    prefs.putInt(("dg" + String(f)).c_str(), clk::digitGlowPct(f));
+    prefs.putInt(("du" + String(f)).c_str(), clk::digitUnlitPct(f));
+  }
   prefs.end();
 }
 
@@ -828,7 +839,8 @@ static clk::Dial makeDial(time_t now, const tm &t, int face, String *key) {
   }
   if (key)
     *key = String(d.face) + "|" + d.moon + "|" + moonStep + "|" + d.temps + "|" + d.in + "|" + d.out + "|" + d.inHum +
-           "|" + d.outHum + "|" + d.pres + "|" + d.presWord + d.presTrend + "|" + d.month + "/" + d.mday;
+           "|" + d.outHum + "|" + d.pres + "|" + d.presWord + d.presTrend + "|" + d.month + "/" + d.mday + "|" +
+           String(clk::digitColor(face), HEX) + "/" + clk::digitGlowPct(face) + "/" + clk::digitUnlitPct(face);
   return d;
 }
 static void handTimes(const tm &t, float &h, float &m) {
@@ -1109,6 +1121,14 @@ static void fillClock(JsonObject c) {
   c["mode"] = MODES[S.mode];
   c["face"] = clk::faceName(S.face);
   c["faceIndex"] = S.face;
+  if (clk::defaultDigitColor(S.face)) {
+    char hex[8];
+    snprintf(hex, sizeof hex, "#%06lx", (unsigned long)clk::digitColor(S.face));
+    JsonObject dg = c["digits"].to<JsonObject>();
+    dg["color"] = hex;
+    dg["glow"] = clk::digitGlowPct(S.face);
+    dg["unlit"] = clk::digitUnlitPct(S.face);
+  }
   c["showing"] = clockShown;
   c["dialMs"] = dialRenderMs;             // how long the last dial took to draw
   c["time"] = nowText();
@@ -1207,6 +1227,35 @@ static const char PAGE_HEAD[] PROGMEM =
     "input[type=text],input[type=password],input[type=number]{width:100%;box-sizing:border-box;padding:7px;background:#141a24;color:#fff;border:1px solid #334;border-radius:6px}"
     "button{padding:8px 16px;border-radius:6px;border:0;background:#00b6ff;color:#012;font-weight:600}.note{color:#889;font-size:13px}</style></head><body>";
 
+// Settings page: the digital faces' colour controls. The preview is tinted here in the browser from two
+// built-in pictures (base + mask; see tools/preview/make_previews.py), so trying colours costs the screen nothing.
+#define DIGIT_JS R"JS(<script>(function(){
+var q=function(i){return document.getElementById(i)},F=document.querySelector('select[name=face]'),pv=q('pv'),cv=q('pvc'),L={};
+if(!F||!cv)return;
+function img(u){return new Promise(function(r){var i=new Image();i.onload=function(){r(i)};i.onerror=function(){r(null)};i.src=u})}
+function px(i){var c=document.createElement('canvas');c.width=c.height=240;var x=c.getContext('2d');x.drawImage(i,0,0,240,240);return x.getImageData(0,0,240,240).data}
+async function layers(f){if(L[f]===undefined){var a=await img('/api/clock.jpg?face='+f+'&layer=base'),b=await img('/api/clock.jpg?face='+f+'&layer=mask');L[f]=a&&b?[px(a),px(b)]:0}return L[f]}
+async function draw(){var f=+F.value,d=DIG[f];
+ if(!d){cv.style.display='none';pv.style.display='block';return}
+ var l=await layers(f);if(+F.value!=f)return;
+ if(!l){cv.style.display='none';pv.style.display='block';return}
+ var r=parseInt(d.c.substr(1,2),16),g=parseInt(d.c.substr(3,2),16),b=parseInt(d.c.substr(5,2),16),G=d.gl?d.g/100:0,U=d.un?d.u/100:0;
+ var x=cv.getContext('2d'),o=x.createImageData(240,240),B=l[0],M=l[1],O=o.data;
+ for(var i=0;i<O.length;i+=4){var k=(M[i]+G*M[i+1]+U*M[i+2])/255;O[i]=B[i]+k*r;O[i+1]=B[i+1]+k*g;O[i+2]=B[i+2]+k*b;O[i+3]=255}
+ x.putImageData(o,0,0);cv.style.display='block';pv.style.display='none'}
+function show(){var d=DIG[+F.value];q('dctl').style.display=d?'':'none';
+ if(d){q('dcol').value=d.c;q('dgl').value=d.g;q('dun').value=d.u;q('dgv').textContent=d.g+'%';q('duv').textContent=d.u+'%';
+  q('dgll').style.display=d.gl?'':'none';q('dul').style.display=d.un?'':'none'}
+ draw()}
+function set(k,v){var f=+F.value,d=DIG[f];if(!d)return;d[k]=v;q('dc'+f).value=d.c;q('dg'+f).value=d.g;q('du'+f).value=d.u;show()}
+q('dcol').oninput=function(){set('c',this.value)};
+q('dgl').oninput=function(){set('g',+this.value)};
+q('dun').oninput=function(){set('u',+this.value)};
+q('dreset').onclick=function(){var d=DIG[+F.value];if(!d)return;d.c=d.d;d.g=100;set('u',100)};
+document.querySelectorAll('.sw [data-c]').forEach(function(b){b.onclick=function(){set('c',b.dataset.c)}});
+F.addEventListener('change',show);show();
+})();</script>)JS"
+
 static void handleRoot() {
   String h = FPSTR(PAGE_HEAD);
   h += "<h1>" + esc(S.name) + "</h1><p class=note>Matrixinator v" + VERSION + " &middot; " + WiFi.localIP().toString() +
@@ -1234,8 +1283,44 @@ static void handleRoot() {
        "<img id=pv alt='Clock preview' src='/api/clock.jpg?face=" + String(S.face) +
        "' onload=\"this.style.opacity=1\" onerror=\"this.style.opacity=1\""
        " style='width:100%;max-width:320px;aspect-ratio:1;display:block;margin:6px auto;border-radius:10px;background:#000;transition:opacity .2s'>"
+       "<canvas id=pvc width=240 height=240 style='display:none;width:100%;max-width:320px;aspect-ratio:1;margin:6px auto;border-radius:10px;background:#000'></canvas>"
        "<p class=note style='text-align:center'>Preview of the face (sample weather). Pick one, then Save.</p>"
-       "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
+       "<div id=dctl style='display:none'>"
+       "<label>Digit colour<input type=color id=dcol style='height:38px'></label>"
+       "<div class=sw>"
+       "<button type=button data-c='#ff2c1c' style='background:#ff2c1c'>Red</button>"
+       "<button type=button data-c='#ff9a1c' style='background:#ff9a1c'>Amber</button>"
+       "<button type=button data-c='#3cff5a' style='background:#3cff5a'>Green</button>"
+       "<button type=button data-c='#78ffb0' style='background:#78ffb0'>VFD</button>"
+       "<button type=button data-c='#00ffe0' style='background:#00ffe0'>Aqua</button>"
+       "<button type=button data-c='#2a9dff' style='background:#2a9dff'>Blue</button>"
+       "<button type=button data-c='#ffffff' style='background:#fff'>White</button></div>"
+       "<label id=dgll>Glow <b id=dgv></b><input type=range id=dgl min=0 max=200 step=5></label>"
+       "<label id=dul>Unlit segments <b id=duv></b><input type=range id=dun min=0 max=300 step=5></label>"
+       "<button type=button id=dreset>Default colour</button>"
+       "<p class=note>For a deeper colour on the backlit screen, pick a fully saturated one (a picker corner), "
+       "turn the glow up and the unlit segments down.</p></div>";
+  {
+    String dj = "{";
+    for (int f = 0; f < clk::FACE_COUNT; f++) {
+      uint32_t def = clk::defaultDigitColor(f);
+      if (!def) continue;
+      char c[8], d[8];
+      snprintf(c, sizeof c, "#%06lx", (unsigned long)clk::digitColor(f));
+      snprintf(d, sizeof d, "#%06lx", (unsigned long)def);
+      if (dj.length() > 1) dj += ",";
+      // gl: has a glow (not Flip); un: has unlit segments (Red LED, VFD)
+      dj += String(f) + ":{c:'" + c + "',d:'" + d + "',g:" + clk::digitGlowPct(f) + ",u:" + clk::digitUnlitPct(f) +
+            ",gl:" + (f != clk::FACE_COUNT - 1 ? "1" : "0") + ",un:" + (f <= 8 ? "1" : "0") + "}";
+      h += "<input type=hidden name=dc" + String(f) + " id=dc" + f + " value='" + c + "'>"
+           "<input type=hidden name=dg" + String(f) + " id=dg" + f + " value=" + clk::digitGlowPct(f) + ">"
+           "<input type=hidden name=du" + String(f) + " id=du" + f + " value=" + clk::digitUnlitPct(f) + ">";
+    }
+    dj += "}";
+    h += "<style>.sw{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}.sw button{padding:6px 9px;color:#000;border:0;"
+         "border-radius:6px;font-size:13px}</style><script>var DIG=" + dj + ";</script>";
+  }
+  h += "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
        "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
        "<label>Day starts at<input type=time name=con value=" + hhmm(S.clkOn) + "></label>"
        "<label>Night starts at<input type=time name=coff value=" + hhmm(S.clkOff) + "></label>"
@@ -1290,7 +1375,7 @@ static void handleRoot() {
        "<button>Save</button></form>"
        "<form method=post action=/update enctype=multipart/form-data><fieldset><legend>Update firmware</legend>"
        "<input type=file name=update accept=.bin> <button>Upload</button>"
-       "<p class=note>Or use Lickety Split to update over Wi-Fi.</p></fieldset></form></body></html>";
+       "<p class=note>Or use Lickety Split to update over Wi-Fi.</p></fieldset></form>" DIGIT_JS "</body></html>";
   web.send(200, "text/html", h);
 }
 
@@ -1314,6 +1399,13 @@ static void handleSettings() {
   if (web.hasArg("mode")) {
     S.mode = constrain(web.arg("mode").toInt(), 0, 2);
     S.face = constrain(web.arg("face").toInt(), 0, clk::FACE_COUNT - 1);
+    for (int f = 0; f < clk::FACE_COUNT; f++) {
+      if (!clk::defaultDigitColor(f) || !web.hasArg("dc" + String(f))) continue;
+      String c = web.arg("dc" + String(f));
+      c.replace("#", "");
+      if (c.length() == 6) clk::setDigitColor(f, strtoul(c.c_str(), nullptr, 16));
+      clk::setDigitLevels(f, web.arg("dg" + String(f)).toInt(), web.arg("du" + String(f)).toInt());
+    }
     S.secs = web.hasArg("secs");
     S.moon = web.hasArg("moon");
     S.clkOn = parseHhmm(web.arg("con"), S.clkOn);
@@ -1496,6 +1588,17 @@ static void setupWeb() {
       bool save = false;
       if (in["face"].is<int>()) { S.face = constrain(in["face"].as<int>(), 0, clk::FACE_COUNT - 1); save = true; }
       if (in["mode"].is<int>()) { S.mode = constrain(in["mode"].as<int>(), 0, 2); save = true; }
+      if (clk::defaultDigitColor(S.face)) {           // the digital face's colour: "#rrggbb", glow %, unlit %
+        if (in["color"].is<const char *>()) {
+          String c = in["color"].as<const char *>();
+          c.replace("#", "");
+          if (c.length() == 6) { clk::setDigitColor(S.face, strtoul(c.c_str(), nullptr, 16)); save = true; }
+        }
+        if (in["glow"].is<int>() || in["unlit"].is<int>()) {
+          clk::setDigitLevels(S.face, in["glow"] | clk::digitGlowPct(S.face), in["unlit"] | clk::digitUnlitPct(S.face));
+          save = true;
+        }
+      }
       if (save) { saveSettings(); clockForce = true; }
       if (pv > 0) {
         if (!S.mode) { S.mode = 1; saveSettings(); }   // a preview needs a clock mode
@@ -1511,8 +1614,17 @@ static void setupWeb() {
   web.on("/api/clock.jpg", HTTP_GET, [] {
     int face = web.hasArg("face") ? constrain(web.arg("face").toInt(), 0, clk::FACE_COUNT - 1) : S.face;
     const FacePreview &p = FACE_PREVIEWS[face];
+    // digital faces: layer=base / layer=mask, for the page to tint with any colour (see make_previews.py)
+    String layer = web.arg("layer");
+    const uint8_t *data = p.data;
+    size_t len = p.len;
+    if (layer == "base" || layer == "mask") {
+      if (!p.base) { web.send(404, "text/plain", "Not a digital face"); return; }
+      data = layer == "base" ? p.base : p.mask;
+      len = layer == "base" ? p.baseLen : p.maskLen;
+    }
     web.sendHeader("Cache-Control", "max-age=86400");
-    web.send_P(200, "image/jpeg", (const char *)p.data, p.len);
+    web.send_P(200, "image/jpeg", (const char *)data, len);
   });
   web.on("/api/restart", HTTP_POST, [] {
     web.send(200, "application/json", "{\"ok\":true}");

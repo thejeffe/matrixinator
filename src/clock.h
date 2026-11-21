@@ -45,6 +45,16 @@ void drawMinuteLayer(uint16_t *buf, int face, int hour24, int minute);
 void drawSecondLayer(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);   // both
 
+// The lit colour (0xRRGGBB) of a digital face (Red LED, VFD, Nixie, Flip; 0 for the others). The glow, unlit
+// segments and text follow it. Draws use it from then on (baseKey changes with it).
+uint32_t digitColor(int face);
+uint32_t defaultDigitColor(int face);
+void setDigitColor(int face, uint32_t rgb);
+// Glow around lit digits and text (0-200 %), and how bright the unlit segments are (0-300 %; Red LED, VFD).
+void setDigitLevels(int face, int glowPct, int unlitPct);
+int digitGlowPct(int face);
+int digitUnlitPct(int face);
+
 void init();                             // build the font once, before drawing from two tasks at a time
 void setYield(void (*fn)());             // called now and then during long drawing (lets other tasks run)
 
