@@ -913,18 +913,18 @@ static void startFlip(uint16_t *from, uint16_t *to) {
 }
 // Animation frames go straight to the screen (fb), and only where something moves: redrawing and copying the whole
 // picture took about 200 ms a frame, too slow to see a flip. dimPx: a pixel at the clock's brightness.
-static uint8_t dim5[32], dim6[64];
+static uint8_t clkDim5[32], clkDim6[64];
 static bool dimFull = true;
 static int dimBri = -1;
 static void setDim(int bri) {
   if (bri == dimBri) return;
   dimBri = bri;
   dimFull = bri >= 255;
-  for (int i = 0; i < 32; i++) dim5[i] = (i * bri + 127) / 255;
-  for (int i = 0; i < 64; i++) dim6[i] = (i * bri + 127) / 255;
+  for (int i = 0; i < 32; i++) clkDim5[i] = (i * bri + 127) / 255;
+  for (int i = 0; i < 64; i++) clkDim6[i] = (i * bri + 127) / 255;
 }
 static inline uint16_t dimPx(uint16_t c) {
-  return dimFull ? c : (uint16_t)((dim5[c >> 11] << 11) | (dim6[(c >> 5) & 63] << 5) | dim5[c & 31]);
+  return dimFull ? c : (uint16_t)((clkDim5[c >> 11] << 11) | (clkDim6[(c >> 5) & 63] << 5) | clkDim5[c & 31]);
 }
 static inline void putRow(uint16_t *d, const uint16_t *sr, int n, int k8) {   // k8 = 256: as it is
   if (k8 >= 256 && dimFull) { memcpy(d, sr, n * 2); return; }
