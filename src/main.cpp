@@ -880,41 +880,56 @@ static void handTimes(const tm &t, float &h, float &m) {
 // Both are drawn over a copy of the dial, frame by frame (about 20 a second) while they run; the rest of the time
 // the clock is still drawn once a second.
 static uint16_t *flipOld = nullptr;          // Flip: the dial as it was before the minute turned
+static uint16_t *flipAlt = nullptr;          // the test's other time
+static uint16_t *flipFrom = nullptr;         // what the cards flip from; flipTo: to (nullptr = the live dial)
+static uint16_t *flipTo = nullptr;
+static uint16_t *holdBuf = nullptr;          // the test: shown instead of the dial until holdUntil
+static uint32_t holdUntil = 0;
+static int demoStage = 0;                    // the test: 1 flipping away, 2 holding, 3 flipping back
 static uint32_t flipAt = 0;                  // when the flip started (0 = not flipping)
+static uint32_t flipFrames = 0, lastFlipFrames = 0, lastFlipMs = 0;   // how smooth the last flip was
+static uint32_t frameCostMs = 0;             // how long the last clock frame took to draw
 static bool flipCardOn[2] = {false, false};  // which cards changed (the hours card only flips on the hour)
 static const uint32_t FLIP_MS = 560;
 static inline uint16_t shade565(uint16_t c, int k) {   // k: 0..256
   return (uint16_t)((((c >> 11) * k >> 8) << 11) | ((((c >> 5) & 63) * k >> 8) << 5) | ((c & 31) * k >> 8));
 }
-static void startFlip() {                    // flipOld: before; dialBuf: after
+static inline uint16_t *flipDest() { return flipTo ? flipTo : dialBuf; }
+static void startFlip(uint16_t *from, uint16_t *to) {
+  flipFrom = from;
+  flipTo = to;
+  uint16_t *dst = flipDest();
   bool any = false;
   for (int k = 0; k < 2; k++) {
     int x0, y0, x1, y1;
     clk::flipCard(k, x0, y0, x1, y1);
     flipCardOn[k] = false;
     for (int y = y0; y < y1 && !flipCardOn[k]; y++)
-      flipCardOn[k] = memcmp(flipOld + y * TFT_W + x0, dialBuf + y * TFT_W + x0, (x1 - x0) * 2) != 0;
+      flipCardOn[k] = memcmp(from + y * TFT_W + x0, dst + y * TFT_W + x0, (x1 - x0) * 2) != 0;
     any |= flipCardOn[k];
   }
   flipAt = any ? (millis() | 1) : 0;
+  flipFrames = 0;
 }
 // A split-flap card: the old top half folds down over the new one, then the new bottom half falls into place.
 static void drawFlip(uint16_t *out, uint32_t now) {
   float p = (now - flipAt) / (float)FLIP_MS;
-  if (p >= 1) { flipAt = 0; return; }
+  if (p >= 1) { lastFlipFrames = flipFrames; lastFlipMs = now - flipAt; flipAt = 0; return; }
+  flipFrames++;
+  uint16_t *flipNew = flipDest();
   for (int k = 0; k < 2; k++) {
     if (!flipCardOn[k]) continue;
     int x0, y0, x1, y1;
     clk::flipCard(k, x0, y0, x1, y1);
     int ym = (y0 + y1) / 2, n = x1 - x0;
-    for (int y = ym; y < y1; y++) memcpy(out + y * TFT_W + x0, flipOld + y * TFT_W + x0, n * 2);   // old bottom
+    for (int y = ym; y < y1; y++) memcpy(out + y * TFT_W + x0, flipFrom + y * TFT_W + x0, n * 2);   // old bottom
     if (p < 0.5f) {                          // the old top flap, folding towards the split
       float q = p * 2, hf = (ym - y0) * cosf(q * 1.5707963f);
       int h = (int)hf, k8 = (int)(256 * (1 - 0.5f * q));
       for (int y = ym - h; y < ym; y++) {
         int sy = ym - (int)((ym - y) * (ym - y0) / fmaxf(hf, 1));
         if (sy < y0) sy = y0;
-        uint16_t *d = out + y * TFT_W + x0, *sr = flipOld + sy * TFT_W + x0;
+        uint16_t *d = out + y * TFT_W + x0, *sr = flipFrom + sy * TFT_W + x0;
         for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
       }
       for (int y = ym - h - 3; y < ym - h; y++)  // a thin shadow under its edge
@@ -925,7 +940,7 @@ static void drawFlip(uint16_t *out, uint32_t now) {
       for (int y = ym; y < ym + h; y++) {
         int sy = ym + (int)((y - ym) * (y1 - ym) / fmaxf(hf, 1));
         if (sy >= y1) sy = y1 - 1;
-        uint16_t *d = out + y * TFT_W + x0, *sr = dialBuf + sy * TFT_W + x0;
+        uint16_t *d = out + y * TFT_W + x0, *sr = flipNew + sy * TFT_W + x0;
         for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
       }
     }
@@ -1011,10 +1026,10 @@ static void clockTick() {
   }
   if (dialReady) {
     if (dialReqKey == key) {                           // a new dial is done and it's time for it: swap it in
-      bool flip = flipOld && clk::isFlip(dialReq.face) && dialFace == dialReq.face;
+      bool flip = flipOld && !demoStage && clk::isFlip(dialReq.face) && dialFace == dialReq.face;
       if (flip) memcpy(flipOld, dialBuf, (size_t)TFT_W * TFT_H * 2);
       std::swap(dialBuf, dialBack);
-      if (flip) startFlip();
+      if (flip) startFlip(flipOld, nullptr);
       dialKey = dialReqKey;
       dialFace = dialReq.face;
       dialReady = false;
@@ -1045,18 +1060,20 @@ static void clockTick() {
     chimedAt = qm;
     if (t.tm_min == 0 || S.chimes == 2) chimeNow(t.tm_min, t.tm_hour);
   }
-  if (clockTest && face == S.face && !dialBusy) {      // a test from the settings page
-    if (clockTest == 1 && clk::isFlip(face) && flipOld && baseBuf) {
-      // the minute before, drawn on fresh cards (the kept base has them without digits)
+  if (clockTest && face == S.face) {                   // a test from the settings page
+    if (clockTest == 1 && clk::isFlip(face) && flipOld && flipAlt && baseBuf && !demoStage) {
+      // flip to another time (an hour and a minute on: both cards change), hold it, flip back
       memcpy(flipOld, dialBuf, (size_t)TFT_W * TFT_H * 2);
-      for (int k = 0; k < 2; k++) {
+      memcpy(flipAlt, dialBuf, (size_t)TFT_W * TFT_H * 2);
+      for (int k = 0; k < 2; k++) {                      // fresh cards (the kept base has them without digits)
         int x0, y0, x1, y1;
         clk::flipCard(k, x0, y0, x1, y1);
-        for (int y = y0; y < y1; y++) memcpy(flipOld + y * TFT_W + x0, baseBuf + y * TFT_W + x0, (x1 - x0) * 2);
+        for (int y = y0; y < y1; y++) memcpy(flipAlt + y * TFT_W + x0, baseBuf + y * TFT_W + x0, (x1 - x0) * 2);
       }
-      int pm = (qm + 1439 - 60 - 1) % 1440;          // an hour and a minute ago: both cards flip
-      clk::drawMinuteLayer(flipOld, face, pm / 60, pm % 60);
-      startFlip();
+      int am = (qm + 61) % 1440;
+      clk::drawMinuteLayer(flipAlt, face, am / 60, am % 60);
+      startFlip(flipOld, flipAlt);
+      demoStage = 1;
     } else if (clockTest >= 2) {
       static const int mins[4] = {15, 30, 45, 0};
       chimeNow(mins[clockTest - 2], t.tm_hour);
@@ -1064,6 +1081,10 @@ static void clockTick() {
     clockTest = 0;
   }
   uint32_t ms = millis();
+  if (demoStage == 1 && !flipAt) { holdBuf = flipAlt; holdUntil = ms + 1500; demoStage = 2; clockForce = true; }
+  if (demoStage == 2 && (int32_t)(ms - holdUntil) >= 0) { holdBuf = nullptr; startFlip(flipAlt, nullptr); demoStage = 3; }
+  if (demoStage == 3 && !flipAt) { demoStage = 0; clockForce = true; }
+  if (demoStage && !clk::isFlip(face)) { demoStage = 0; holdBuf = nullptr; flipAt = 0; }
   bool anim = flipAt || chimeEnd;
   static uint32_t animAt = 0;
   static bool wasAnim = false;
@@ -1078,7 +1099,8 @@ static void clockTick() {
   clockForce = false;
   wasAnim = anim;
   if (anim) animAt = ms;
-  memcpy(clkBuf, dialBuf, (size_t)TFT_W * TFT_H * 2);
+  uint32_t drawT0 = millis();
+  memcpy(clkBuf, flipAt ? flipDest() : holdBuf ? holdBuf : dialBuf, (size_t)TFT_W * TFT_H * 2);
   if (flipAt) drawFlip(clkBuf, ms);
   if (chimeEnd) drawChime(clkBuf, ms, clk::chimeColor(face));
   float hh, mm;
@@ -1101,6 +1123,7 @@ static void clockTick() {
       fb[i] = (d5[c >> 11] << 11) | (d6[(c >> 5) & 63] << 5) | d5[c & 31];
     }
   Cache_WriteBack_Addr((uint32_t)fb, n * 2);
+  frameCostMs = millis() - drawT0;
   if (asleep) { asleep = false; backlight(); }        // the clock first, then the light
 }
 
@@ -1308,6 +1331,10 @@ static void fillClock(JsonObject c) {
     dg["unlit"] = clk::digitUnlitPct(S.face);
   }
   c["showing"] = clockShown;
+  JsonObject an = c["anim"].to<JsonObject>();         // how smooth the animations are on this chip
+  an["frameMs"] = frameCostMs;
+  an["lastFlipFrames"] = lastFlipFrames;
+  an["lastFlipMs"] = lastFlipMs;
   c["dialMs"] = dialRenderMs;             // how long the last dial took to draw
   c["time"] = nowText();
   c["timeSet"] = timeOk();
@@ -1405,7 +1432,7 @@ static const char PAGE_HEAD[] PROGMEM =
     "input[type=text],input[type=password],input[type=number]{width:100%;box-sizing:border-box;padding:7px;background:#141a24;color:#fff;border:1px solid #334;border-radius:6px}"
     "button{padding:8px 16px;border-radius:6px;border:0;background:#00b6ff;color:#012;font-weight:600}.note{color:#889;font-size:13px}"
     ".savebar{position:sticky;bottom:0;z-index:5;background:#0a0e15;padding:10px 0 12px;border-top:1px solid #334;margin-top:8px}"
-    ".tests{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}.tests button{padding:6px 11px}</style></head><body>";
+    ".fsave{text-align:right;margin:10px 0 2px}.tests{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}.tests button{padding:6px 11px}</style></head><body>";
 
 // Settings page: the digital faces' colour controls. The preview is tinted here in the browser from two
 // built-in pictures (base + mask; see tools/preview/make_previews.py), so trying colours costs the screen nothing.
@@ -1458,11 +1485,11 @@ static void handleRoot() {
        "<label>Width (LEDs)<input type=number min=1 max=240 name=w value=" + String(S.w) + "></label>"
        "<label>Height (LEDs)<input type=number min=1 max=240 name=h value=" + String(S.h) + "></label>"
        "<label><input type=checkbox name=unlit " + (S.unlit ? "checked" : "") + "> Show unlit LEDs as dark dots</label>"
-       "<p class=note>Set the same size as the LED sign. Signinator reads it from /json/info like it does from WLED.</p></fieldset>"
+       "<p class=note>Set the same size as the LED sign. Signinator reads it from /json/info like it does from WLED.</p><div class=fsave><button>Save</button></div></fieldset>"
        "<fieldset><legend>Brightness</legend>"
        "<label><input type=checkbox name=follow " + String(S.follow ? "checked" : "") + "> Follow the brightness Signinator sends</label>"
        "<label>Brightest (10-255)<input type=number min=10 max=255 name=blmax value=" + String(S.blMax) + "></label>"
-       "<label>Dimmest (0-255)<input type=number min=0 max=255 name=blmin value=" + String(S.blMin) + "></label></fieldset>"
+       "<label>Dimmest (0-255)<input type=number min=0 max=255 name=blmin value=" + String(S.blMin) + "></label><div class=fsave><button>Save</button></div></fieldset>"
        "<fieldset><legend>Clock</legend>"
        "<label>Screen mode<select name=mode>";
   for (int m = 0; m < 3; m++)
@@ -1513,7 +1540,7 @@ static void handleRoot() {
        "<label id=dul>Unlit segments <b id=duv></b><input type=range id=dun min=0 max=300 step=5></label>"
        "<button type=button id=dreset>Default colour</button>"
        "<p class=note>Hue moves green (150\u00b0) towards blue (190\u00b0) one degree at a time. For a deeper colour on the backlit screen, keep saturation at 100%, "
-       "turn the glow up and the unlit segments down.</p></div>";
+       "turn the glow up and the unlit segments down.</p></div><div class=fsave><button>Save</button></div>";
   {
     String dj = "{";
     for (int f = 0; f < clk::FACE_COUNT; f++) {
@@ -1566,11 +1593,11 @@ static void handleRoot() {
        "<div class=tests><span class=note>Try it on the screen (the saved face):</span> "
        "<button type=button data-t=chime15>:15</button><button type=button data-t=chime30>:30</button>"
        "<button type=button data-t=chime45>:45</button><button type=button data-t=chime00>Hour</button>"
-       "<button type=button data-t=flip>Flip</button> <span id=tmsg class=note></span></div>"
+       "<button type=button data-t=flip>Flip (Flip face)</button> <span id=tmsg class=note></span></div>"
        "<script>document.querySelectorAll('[data-t]').forEach(function(b){b.onclick=function(){var m=document.getElementById('tmsg');"
        "m.textContent='';fetch('/api/clock',{method:'POST',body:JSON.stringify({test:b.dataset.t})}).then(function(r){return r.json()})"
        ".then(function(j){m.textContent=j.error||'Showing on the screen'}).catch(function(){m.textContent='No answer'})}})</script>"
-       "</fieldset>"
+       "<div class=fsave><button>Save</button></div></fieldset>"
        "<fieldset><legend>Home Assistant weather</legend>"
        "<label><input type=checkbox name=ha " + String(S.ha ? "checked" : "") + "> Show temperature, humidity and pressure on the clock</label>"
        "<label>Home Assistant URL<input type=text name=haurl value=\"" + esc(S.haUrl) + "\"></label>"
@@ -1597,7 +1624,7 @@ static void handleRoot() {
     xSemaphoreGive(haLock);
     h += "<p class=note>" + st + "</p>";
   }
-  h += "</fieldset>"
+  h += "<div class=fsave><button>Save</button></div></fieldset>"
        "<fieldset><legend>Wi-Fi</legend>"
        "<label>Network<input type=text name=ssid value=\"" + esc(S.ssid) + "\"></label>"
        "<label>Password<input type=password name=pass placeholder='" + (S.pass.length() ? "saved; type to change" : "") + "'></label>"
@@ -1918,6 +1945,7 @@ void setup() {
   });
   clkBuf = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   flipOld = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
+  flipAlt = (uint16_t *)ps_malloc((size_t)TFT_W * TFT_H * 2);
   curW = S.w; curH = S.h;
   Serial.printf("display begin=%d fb=%p psram=%u free=%u\n", gfxOk, fb, ESP.getPsramSize(), ESP.getFreePsram());
   layout();
