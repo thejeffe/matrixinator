@@ -911,95 +911,150 @@ static void startFlip(uint16_t *from, uint16_t *to) {
   flipAt = any ? (millis() | 1) : 0;
   flipFrames = 0;
 }
+// Animation frames go straight to the screen (fb), and only where something moves: redrawing and copying the whole
+// picture took about 200 ms a frame, too slow to see a flip. dimPx: a pixel at the clock's brightness.
+static uint8_t dim5[32], dim6[64];
+static bool dimFull = true;
+static int dimBri = -1;
+static void setDim(int bri) {
+  if (bri == dimBri) return;
+  dimBri = bri;
+  dimFull = bri >= 255;
+  for (int i = 0; i < 32; i++) dim5[i] = (i * bri + 127) / 255;
+  for (int i = 0; i < 64; i++) dim6[i] = (i * bri + 127) / 255;
+}
+static inline uint16_t dimPx(uint16_t c) {
+  return dimFull ? c : (uint16_t)((dim5[c >> 11] << 11) | (dim6[(c >> 5) & 63] << 5) | dim5[c & 31]);
+}
+static inline void putRow(uint16_t *d, const uint16_t *sr, int n, int k8) {   // k8 = 256: as it is
+  if (k8 >= 256 && dimFull) { memcpy(d, sr, n * 2); return; }
+  for (int i = 0; i < n; i++) d[i] = dimPx(k8 >= 256 ? sr[i] : shade565(sr[i], k8));
+}
+static int dirtyY0 = TFT_H, dirtyY1 = -1;        // rows of fb changed this frame (written back from the cache)
+static inline void dirty(int y0, int y1) { if (y0 < dirtyY0) dirtyY0 = y0; if (y1 > dirtyY1) dirtyY1 = y1; }
+
 // A split-flap card: the old top half folds down over the new one, then the new bottom half falls into place.
-static void drawFlip(uint16_t *out, uint32_t now) {
+// The whole card is drawn each frame: the new top, the folding flap (with a shadow under it), the bottom.
+static void drawFlip(uint32_t now) {
   float p = (now - flipAt) / (float)FLIP_MS;
   if (p >= 1) { lastFlipFrames = flipFrames; lastFlipMs = now - flipAt; flipAt = 0; return; }
   flipFrames++;
   uint16_t *flipNew = flipDest();
+  const int lim = min(overlayTop, TFT_H);
   for (int k = 0; k < 2; k++) {
     if (!flipCardOn[k]) continue;
     int x0, y0, x1, y1;
     clk::flipCard(k, x0, y0, x1, y1);
     int ym = (y0 + y1) / 2, n = x1 - x0;
-    for (int y = ym; y < y1; y++) memcpy(out + y * TFT_W + x0, flipFrom + y * TFT_W + x0, n * 2);   // old bottom
-    if (p < 0.5f) {                          // the old top flap, folding towards the split
+    if (p < 0.5f) {                          // the old top flap, folding towards the split, over the new top
       float q = p * 2, hf = (ym - y0) * cosf(q * 1.5707963f);
       int h = (int)hf, k8 = (int)(256 * (1 - 0.5f * q));
-      for (int y = ym - h; y < ym; y++) {
-        int sy = ym - (int)((ym - y) * (ym - y0) / fmaxf(hf, 1));
-        if (sy < y0) sy = y0;
-        uint16_t *d = out + y * TFT_W + x0, *sr = flipFrom + sy * TFT_W + x0;
-        for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
+      for (int y = y0; y < ym && y < lim; y++) {
+        uint16_t *d = fb + y * TFT_W + x0;
+        if (y >= ym - h) {
+          int sy = ym - (int)((ym - y) * (ym - y0) / fmaxf(hf, 1));
+          putRow(d, flipFrom + (sy < y0 ? y0 : sy) * TFT_W + x0, n, k8);
+        } else {
+          putRow(d, flipNew + y * TFT_W + x0, n, y >= ym - h - 4 ? 160 : 256);   // a shadow just above its edge
+        }
       }
-      for (int y = ym - h - 3; y < ym - h; y++)  // a thin shadow under its edge
-        if (y >= y0) { uint16_t *d = out + y * TFT_W + x0; for (int i = 0; i < n; i++) d[i] = shade565(d[i], 150); }
-    } else {                                 // the new bottom flap, falling from the split
+      for (int y = ym; y < y1 && y < lim; y++) putRow(fb + y * TFT_W + x0, flipFrom + y * TFT_W + x0, n, 256);
+    } else {                                 // the new bottom flap, falling from the split over the old bottom
       float q = (p - 0.5f) * 2, hf = (y1 - ym) * sinf(q * 1.5707963f);
       int h = (int)hf, k8 = (int)(256 * (0.55f + 0.45f * q));
-      for (int y = ym; y < ym + h; y++) {
-        int sy = ym + (int)((y - ym) * (y1 - ym) / fmaxf(hf, 1));
-        if (sy >= y1) sy = y1 - 1;
-        uint16_t *d = out + y * TFT_W + x0, *sr = flipNew + sy * TFT_W + x0;
-        for (int i = 0; i < n; i++) d[i] = shade565(sr[i], k8);
+      for (int y = y0; y < ym && y < lim; y++) putRow(fb + y * TFT_W + x0, flipNew + y * TFT_W + x0, n, 256);
+      for (int y = ym; y < y1 && y < lim; y++) {
+        uint16_t *d = fb + y * TFT_W + x0;
+        if (y < ym + h) {
+          int sy = ym + (int)((y - ym) * (y1 - ym) / fmaxf(hf, 1));
+          putRow(d, flipNew + (sy >= y1 ? y1 - 1 : sy) * TFT_W + x0, n, k8);
+        } else {
+          putRow(d, flipFrom + y * TFT_W + x0, n, y < ym + h + 4 ? 180 : 256);
+        }
       }
     }
+    dirty(y0, min(y1, lim) - 1);
   }
 }
 
 // Visual chimes: rings of light from the middle in the face's colour. Quarter past: one soft ring, half past: two,
 // quarter to: three; on the hour four, then one strong ring for each hour (3 o'clock: three).
+// Drawn on fb from clkBuf (the clock without rings); each frame first puts back where the rings were.
 struct Pulse { uint32_t at; float strength; };
 static Pulse pulses[20];
 static int nPulses = 0;
 static uint32_t chimeEnd = 0;
 static const uint32_t RING_MS = 1700;
+static float ringWasR[20], ringWasW[20];        // where each ring was last frame (w = 0: nowhere)
 static void startChime(int quarters, int strikes) {
-  uint32_t t = millis() + 200;
+  uint32_t t = millis() + (flipAt ? 900 : 200);  // after a flip that's running (the minute turning)
   nPulses = 0;
   for (int i = 0; i < quarters && nPulses < 20; i++) pulses[nPulses++] = {t + i * 480u, 0.55f};
   uint32_t s0 = t + quarters * 480u + 700;
   for (int i = 0; i < strikes && nPulses < 20; i++) pulses[nPulses++] = {s0 + i * 1150u, 1.0f};
+  for (int i = 0; i < 20; i++) ringWasW[i] = 0;
   chimeEnd = (nPulses ? pulses[nPulses - 1].at + RING_MS : t) | 1;
 }
 static void chimeNow(int minute, int hour24) {
   int q = minute / 15;
   startChime(q ? q : 4, q ? 0 : (hour24 + 11) % 12 + 1);
 }
-static void drawChime(uint16_t *out, uint32_t now, uint32_t rgb) {
+// Each row's two spans of the ring R +- w round the middle.
+template <typename F> static void ringSpans(float R, float w, int lim, F fn) {
+  const float cx = TFT_W / 2.0f, cy = TFT_H / 2.0f;
+  int ya = max(0, (int)(cy - R - w)), yb = min(lim - 1, (int)(cy + R + w));
+  for (int y = ya; y <= yb; y++) {
+    float dy = y + 0.5f - cy, ro = (R + w) * (R + w) - dy * dy;
+    if (ro <= 0) continue;
+    float ri = (R - w) > 0 ? (R - w) * (R - w) - dy * dy : -1;
+    int xo = (int)sqrtf(ro) + 1, xi = ri > 0 ? (int)sqrtf(ri) : 0;
+    for (int side = -1; side <= 1; side += 2) {
+      int from = side < 0 ? (int)cx - xo : (int)cx + xi, to = side < 0 ? (int)cx - xi - 1 : (int)cx + xo;
+      from = max(0, from); to = min(TFT_W - 1, to);
+      if (from <= to) fn(y, dy, from, to);
+    }
+  }
+}
+// fresh: fb was just drawn from clkBuf (nothing to put back)
+static void drawChime(uint32_t now, uint32_t rgb, bool fresh) {
+  const int lim = min(overlayTop, TFT_H);
+  for (int i = 0; i < nPulses; i++)                // put back what last frame's rings covered
+    if (!fresh && ringWasW[i] > 0)
+      ringSpans(ringWasR[i], ringWasW[i], lim, [&](int y, float, int a, int b) {
+        putRow(fb + y * TFT_W + a, clkBuf + y * TFT_W + a, b - a + 1, 256);
+        dirty(y, y);
+      });
+  for (int i = 0; i < 20; i++) ringWasW[i] = 0;
   if ((int32_t)(now - chimeEnd) >= 0) { chimeEnd = 0; return; }
   float cr = (rgb >> 16) & 255, cg = (rgb >> 8) & 255, cb = rgb & 255;
   if (cr * 0.3f + cg * 0.59f + cb * 0.11f > 100) {   // a light colour: lighter still, so it shows on its own face
     cr += (255 - cr) * 0.45f; cg += (255 - cg) * 0.45f; cb += (255 - cb) * 0.45f;
   }
-  const float cx = TFT_W / 2.0f, cy = TFT_H / 2.0f;
+  const float cx = TFT_W / 2.0f;
   for (int i = 0; i < nPulses; i++) {
     int32_t age = (int32_t)(now - pulses[i].at);
     if (age < 0 || age >= (int32_t)RING_MS) continue;
     float t = age / (float)RING_MS, e = 1 - (1 - t) * (1 - t);
     float R = 16 + 330 * e, w = 9 + 14 * pulses[i].strength;
     float a0 = fminf(1, pulses[i].strength * 0.95f) * powf(1 - t, 1.3f);
-    int ya = max(0, (int)(cy - R - w)), yb = min(TFT_H - 1, (int)(cy + R + w));
-    for (int y = ya; y <= yb; y++) {
-      float dy = y + 0.5f - cy, ro = (R + w) * (R + w) - dy * dy;
-      if (ro <= 0) continue;
-      float ri = (R - w) > 0 ? (R - w) * (R - w) - dy * dy : -1;
-      int xo = (int)sqrtf(ro) + 1, xi = ri > 0 ? (int)sqrtf(ri) : 0;
-      for (int side = -1; side <= 1; side += 2) {          // the two spans of the ring on this row
-        int from = side < 0 ? (int)cx - xo : (int)cx + xi, to = side < 0 ? (int)cx - xi - 1 : (int)cx + xo;
-        from = max(0, from); to = min(TFT_W - 1, to);
-        uint16_t *row = out + y * TFT_W;
-        for (int x = from; x <= to; x++) {
-          float dx = x + 0.5f - cx, d = fabsf(sqrtf(dx * dx + dy * dy) - R) / w;
-          if (d >= 1) continue;
-          float a = a0 * (1 - d) * (1 - d);
-          uint16_t c = row[x];
-          float r = ((c >> 11) & 31) * (255.0f / 31), g = ((c >> 5) & 63) * (255.0f / 63), b = (c & 31) * (255.0f / 31);
-          r += (cr - r) * a; g += (cg - g) * a; b += (cb - b) * a;
-          row[x] = (((int)r & 0xF8) << 8) | (((int)g & 0xFC) << 3) | ((int)b >> 3);
-        }
+    ringWasR[i] = R; ringWasW[i] = w;
+    ringSpans(R, w, lim, [&](int y, float dy, int from, int to) {
+      const uint16_t *src = clkBuf + y * TFT_W;
+      uint16_t *dst = fb + y * TFT_W;
+      for (int x = from; x <= to; x++) {
+        float dx = x + 0.5f - cx, d = fabsf(sqrtf(dx * dx + dy * dy) - R) / w;
+        if (d >= 1) continue;
+        // over what's already there (another ring), else the clock
+        uint16_t c = dst[x] != dimPx(src[x]) ? dst[x] : src[x];
+        bool onRing = c == dst[x] && dst[x] != dimPx(src[x]);
+        float a = a0 * (1 - d) * (1 - d);
+        float r = ((c >> 11) & 31) * (255.0f / 31), g = ((c >> 5) & 63) * (255.0f / 63), b = (c & 31) * (255.0f / 31);
+        r += (cr - r) * a; g += (cg - g) * a; b += (cb - b) * a;
+        uint16_t o = (((int)r & 0xF8) << 8) | (((int)g & 0xFC) << 3) | ((int)b >> 3);
+        dst[x] = onRing ? o : dimPx(o);
       }
-    }
+      dirty(y, y);
+    });
   }
 }
 static int clockTest = 0;                    // asked from the settings page: 1 flip, 2..5 chime at :15 :30 :45 :00
@@ -1095,34 +1150,31 @@ static void clockTick() {
   if (bri != briShown) { briShown = bri; clockForce = true; }
   int32_t stamp = (t.tm_hour * 60 + t.tm_min) * 60 + (secs ? t.tm_sec : 0);
   if (stamp == clockStamp && !clockForce && !animFrame && !(wasAnim && !anim)) return;
-  clockStamp = stamp;
-  clockForce = false;
+  if (wasAnim && !anim) clockForce = true;              // an animation just ended: a clean frame
   wasAnim = anim;
   if (anim) animAt = ms;
   uint32_t drawT0 = millis();
-  memcpy(clkBuf, flipAt ? flipDest() : holdBuf ? holdBuf : dialBuf, (size_t)TFT_W * TFT_H * 2);
-  if (flipAt) drawFlip(clkBuf, ms);
-  if (chimeEnd) drawChime(clkBuf, ms, clk::chimeColor(face));
-  float hh, mm;
-  handTimes(t, hh, mm);
-  clk::drawSecondLayer(clkBuf, face, hh, mm, t.tm_sec, secs);   // the minute layer is in the dial
-  // to the screen at the clock's brightness, leaving the tap overlay alone
-  static uint8_t d5[32], d6[64];
-  static int dimAt = -1;
-  if (dimAt != bri) {
-    for (int i = 0; i < 32; i++) d5[i] = (i * bri + 127) / 255;
-    for (int i = 0; i < 64; i++) d6[i] = (i * bri + 127) / 255;
-    dimAt = bri;
+  setDim(bri);
+  const int rows = min(overlayTop, TFT_H);
+  dirtyY0 = TFT_H; dirtyY1 = -1;
+  bool full = stamp != clockStamp || clockForce || !animFrame || !anim;   // a new second (or a change): everything
+  clockStamp = stamp;
+  clockForce = false;
+  if (full) {
+    // the clock without the animations, kept in clkBuf, then to the screen at the clock's brightness
+    memcpy(clkBuf, flipAt ? flipDest() : holdBuf ? holdBuf : dialBuf, (size_t)TFT_W * TFT_H * 2);
+    float hh, mm;
+    handTimes(t, hh, mm);
+    clk::drawSecondLayer(clkBuf, face, hh, mm, t.tm_sec, secs);   // the minute layer is in the dial
+    size_t n = (size_t)rows * TFT_W;
+    if (dimFull) memcpy(fb, clkBuf, n * 2);
+    else for (size_t i = 0; i < n; i++) fb[i] = dimPx(clkBuf[i]);
+    dirty(0, rows - 1);
   }
-  int rows = min(overlayTop, TFT_H);
-  size_t n = (size_t)rows * TFT_W;
-  if (bri >= 255) memcpy(fb, clkBuf, n * 2);
-  else
-    for (size_t i = 0; i < n; i++) {
-      uint16_t c = clkBuf[i];
-      fb[i] = (d5[c >> 11] << 11) | (d6[(c >> 5) & 63] << 5) | d5[c & 31];
-    }
-  Cache_WriteBack_Addr((uint32_t)fb, n * 2);
+  if (chimeEnd) drawChime(ms, clk::chimeColor(face), full);
+  if (flipAt) drawFlip(ms);
+  if (dirtyY1 >= dirtyY0)
+    Cache_WriteBack_Addr((uint32_t)(fb + dirtyY0 * TFT_W), (size_t)(dirtyY1 - dirtyY0 + 1) * TFT_W * 2);
   frameCostMs = millis() - drawT0;
   if (asleep) { asleep = false; backlight(); }        // the clock first, then the light
 }
