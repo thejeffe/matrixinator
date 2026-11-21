@@ -1229,7 +1229,7 @@ static const char PAGE_HEAD[] PROGMEM =
 
 // Settings page: the digital faces' colour controls. The preview is tinted here in the browser from two
 // built-in pictures (base + mask; see tools/preview/make_previews.py), so trying colours costs the screen nothing.
-#define DIGIT_JS R"JS(<script>(function(){
+static const char DIGIT_JS[] = R"JS(<script>(function(){
 var q=function(i){return document.getElementById(i)},F=document.querySelector('select[name=face]'),pv=q('pv'),cv=q('pvc'),L={};
 if(!F||!cv)return;
 function img(u){return new Promise(function(r){var i=new Image();i.onload=function(){r(i)};i.onerror=function(){r(null)};i.src=u})}
@@ -1254,7 +1254,7 @@ q('dun').oninput=function(){set('u',+this.value)};
 q('dreset').onclick=function(){var d=DIG[+F.value];if(!d)return;d.c=d.d;d.g=100;set('u',100)};
 document.querySelectorAll('.sw [data-c]').forEach(function(b){b.onclick=function(){set('c',b.dataset.c)}});
 F.addEventListener('change',show);show();
-})();</script>)JS"
+})();</script>)JS";
 
 static void handleRoot() {
   String h = FPSTR(PAGE_HEAD);
@@ -1375,7 +1375,9 @@ static void handleRoot() {
        "<button>Save</button></form>"
        "<form method=post action=/update enctype=multipart/form-data><fieldset><legend>Update firmware</legend>"
        "<input type=file name=update accept=.bin> <button>Upload</button>"
-       "<p class=note>Or use Lickety Split to update over Wi-Fi.</p></fieldset></form>" DIGIT_JS "</body></html>";
+       "<p class=note>Or use Lickety Split to update over Wi-Fi.</p></fieldset></form>";
+  h += DIGIT_JS;
+  h += "</body></html>";
   web.send(200, "text/html", h);
 }
 
