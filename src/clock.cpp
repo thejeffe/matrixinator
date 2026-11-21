@@ -981,8 +981,8 @@ static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float
 struct Digi { C3 on, glow, ghost, text, dim; };
 // The lit colour of each digital face (settable); everything else on the face is worked out from it, as
 // k * colour + a fixed part, so the settings page can tint a preview without asking the screen.
-static const uint32_t DIGIT_DEFAULT[4] = {0xFF2C1C, 0x78FFB0, 0xFF963C, 0xEEEEE8};   // Red LED, VFD, Nixie, Flip
-static uint32_t digitRGB[4] = {0xFF2C1C, 0x78FFB0, 0xFF963C, 0xEEEEE8};
+static const uint32_t DIGIT_DEFAULT[4] = {0xFF2C1C, 0x00F2C8, 0xFF963C, 0xEEEEE8};   // Red LED, VFD, Nixie, Flip
+static uint32_t digitRGB[4] = {0xFF2C1C, 0x00F2C8, 0xFF963C, 0xEEEEE8};
 static float digitGlow[4] = {1, 1, 1, 1}, digitUnlit[4] = {1, 1, 1, 1};   // 1 = as designed
 static C3 digitC3(int f) {
   uint32_t v = digitRGB[f - F_LED];

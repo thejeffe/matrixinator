@@ -51,6 +51,7 @@ struct Settings {
   int clkBri = 200;
   int night = 0;            // outside the clock's hours: 0 = screen off, 1 = the clock, dimmed
   int nightBri = 40;
+  int bootSecs = 20;        // power-on: the Matrix rain plays this long before pictures or the clock
   String tz = "PST8PDT,M3.2.0,M11.1.0";
   // Home Assistant temperatures
   bool ha = false;
@@ -89,6 +90,7 @@ static void loadSettings() {
   S.clkBri = constrain(prefs.getInt("cbri", 200), 10, 255);
   S.night = constrain(prefs.getInt("night", 0), 0, 1);
   S.nightBri = constrain(prefs.getInt("nbri", 40), 5, 255);
+  S.bootSecs = constrain(prefs.getInt("boot", 20), 0, 120);
   S.tz = prefs.getString("tz", "PST8PDT,M3.2.0,M11.1.0");
   S.ha = prefs.getBool("ha", false);
   S.haUrl = prefs.getString("haurl", "http://homeassistant.local:8123");
@@ -123,6 +125,7 @@ static void saveSettings() {
   prefs.putInt("cbri", S.clkBri);
   prefs.putInt("night", S.night);
   prefs.putInt("nbri", S.nightBri);
+  prefs.putInt("boot", S.bootSecs);
   prefs.putString("tz", S.tz);
   prefs.putBool("ha", S.ha);
   prefs.putString("haurl", S.haUrl);
@@ -168,6 +171,8 @@ static bool clockShown = false;    // the clock is on the screen
 static bool clockForce = false;    // redraw the clock now (something drew over it)
 static uint32_t idleSince = 0, peekUntil = 0;
 static const uint32_t IDLE_SLEEP_MS = 15000;
+static uint32_t bootRainUntil = 0;   // power-on: the rain plays until then (0 = done)
+static bool bootRain() { if (bootRainUntil && (int32_t)(millis() - bootRainUntil) >= 0) bootRainUntil = 0; return bootRainUntil; }
 static String npTitle, npArtist;        // the song (from Signinator), shown on a tap
 static void goDark();
 static void wakeAfterDraw(bool wasAsleep);
@@ -395,7 +400,7 @@ static void drawNewFrame() {
   lastFrameAt = millis();
   liveFrom = IPAddress(rxFrom);
   frames++;
-  if (!on || S.mode == 2) return;          // off, or "Clock only": not drawn
+  if (!on || S.mode == 2 || bootRain()) return;   // off, "Clock only" or the power-on rain: not drawn
   bool wasAsleep = asleep;
   idleSince = 0; peekUntil = 0;
   if (idleShown || photoShown || clockShown) {
@@ -466,7 +471,9 @@ static int photoDraw(JPEGDRAW *d) {
 }
 
 static void showPhoto(uint8_t *data, size_t len, int scale) {
-  if (!on || S.mode == 2 || !data || !len) return;
+  if (!data || !len) return;
+  if (bootRain()) { lastFrameAt = millis(); frames++; return; }   // the power-on rain is still playing
+  if (!on || S.mode == 2) return;
   if (!jpeg.openRAM(data, len, photoDraw)) return;
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
   int w = jpeg.getWidth(), h = jpeg.getHeight();
@@ -1243,11 +1250,24 @@ async function draw(){var f=+F.value,d=DIG[f];
  var x=cv.getContext('2d'),o=x.createImageData(240,240),B=l[0],M=l[1],O=o.data;
  for(var i=0;i<O.length;i+=4){var k=(M[i]+G*M[i+1]+U*M[i+2])/255;O[i]=B[i]+k*r;O[i+1]=B[i+1]+k*g;O[i+2]=B[i+2]+k*b;O[i+3]=255}
  x.putImageData(o,0,0);cv.style.display='block';pv.style.display='none'}
-function show(){var d=DIG[+F.value];q('dctl').style.display=d?'':'none';
- if(d){q('dcol').value=d.c;q('dgl').value=d.g;q('dun').value=d.u;q('dgv').textContent=d.g+'%';q('duv').textContent=d.u+'%';
+function hsv(c){var r=parseInt(c.substr(1,2),16)/255,g=parseInt(c.substr(3,2),16)/255,b=parseInt(c.substr(5,2),16)/255,
+ M=Math.max(r,g,b),m=Math.min(r,g,b),e=M-m,h=0;if(e){h=M==r?(g-b)/e%6:M==g?(b-r)/e+2:(r-g)/e+4;h*=60;if(h<0)h+=360}
+ return [Math.round(h),Math.round(M?e/M*100:0),Math.round(M*100)]}
+function hex(h,s,v){s/=100;v/=100;var f=function(n){var k=(n+h/60)%6;return Math.round(255*(v-v*s*Math.max(0,Math.min(k,4-k,1))))};
+ return '#'+[f(5),f(3),f(1)].map(function(x){return ('0'+x.toString(16)).slice(-2)}).join('')}
+function hsvShow(d,keep){if(!keep){var a=hsv(d.c);d.H=a[0];d.S=a[1];d.V=a[2]}
+ q('dh').value=d.H;q('ds').value=d.S;q('dv').value=d.V;q('dhv').textContent=d.H+'\u00b0';q('dsv').textContent=d.S+'%';q('dvv').textContent=d.V+'%';
+ if(document.activeElement!=q('dhex'))q('dhex').value=d.c}
+function show(keep){var d=DIG[+F.value];q('dctl').style.display=d?'':'none';
+ if(d){q('dcol').value=d.c;hsvShow(d,keep);q('dgl').value=d.g;q('dun').value=d.u;q('dgv').textContent=d.g+'%';q('duv').textContent=d.u+'%';
   q('dgll').style.display=d.gl?'':'none';q('dul').style.display=d.un?'':'none'}
  draw()}
-function set(k,v){var f=+F.value,d=DIG[f];if(!d)return;d[k]=v;q('dc'+f).value=d.c;q('dg'+f).value=d.g;q('du'+f).value=d.u;show()}
+function set(k,v,keep){var f=+F.value,d=DIG[f];if(!d)return;d[k]=v;q('dc'+f).value=d.c;q('dg'+f).value=d.g;q('du'+f).value=d.u;show(keep)}
+function fine(){var d=DIG[+F.value];if(!d)return;d.H=+q('dh').value;d.S=+q('ds').value;d.V=+q('dv').value;set('c',hex(d.H,d.S,d.V),1)}
+['dh','ds','dv'].forEach(function(i){q(i).oninput=fine});
+document.querySelectorAll('[data-n]').forEach(function(b){b.onclick=function(){var t=q(b.dataset.n);
+ t.value=Math.max(+t.min,Math.min(+t.max,+t.value+(+b.dataset.d)));fine()}});
+q('dhex').oninput=function(){var v=this.value.trim();if(v[0]!='#')v='#'+v;if(/^#[0-9a-fA-F]{6}$/.test(v))set('c',v.toLowerCase())};
 q('dcol').oninput=function(){set('c',this.value)};
 q('dgl').oninput=function(){set('g',+this.value)};
 q('dun').oninput=function(){set('u',+this.value)};
@@ -1291,14 +1311,31 @@ static void handleRoot() {
        "<button type=button data-c='#ff2c1c' style='background:#ff2c1c'>Red</button>"
        "<button type=button data-c='#ff9a1c' style='background:#ff9a1c'>Amber</button>"
        "<button type=button data-c='#3cff5a' style='background:#3cff5a'>Green</button>"
-       "<button type=button data-c='#78ffb0' style='background:#78ffb0'>VFD</button>"
+       "<button type=button data-c='#00f2c8' style='background:#00f2c8'>VFD</button>"
        "<button type=button data-c='#00ffe0' style='background:#00ffe0'>Aqua</button>"
        "<button type=button data-c='#2a9dff' style='background:#2a9dff'>Blue</button>"
        "<button type=button data-c='#ffffff' style='background:#fff'>White</button></div>"
+       "<div class=note>Stereo greens and blues</div><div class=sw>"
+       "<button type=button data-c='#3cffa0' style='background:#3cffa0'>&nbsp;</button>"
+       "<button type=button data-c='#14ffb4' style='background:#14ffb4'>&nbsp;</button>"
+       "<button type=button data-c='#00fac0' style='background:#00fac0'>&nbsp;</button>"
+       "<button type=button data-c='#00f2c8' style='background:#00f2c8'>&nbsp;</button>"
+       "<button type=button data-c='#00ecd2' style='background:#00ecd2'>&nbsp;</button>"
+       "<button type=button data-c='#00e6dc' style='background:#00e6dc'>&nbsp;</button>"
+       "<button type=button data-c='#00dce8' style='background:#00dce8'>&nbsp;</button>"
+       "<button type=button data-c='#00d0f4' style='background:#00d0f4'>&nbsp;</button>"
+       "<button type=button data-c='#00c0ff' style='background:#00c0ff'>&nbsp;</button></div>"
+       "<label>Fine tune<input type=text id=dhex maxlength=7 placeholder='#00f2c8' style='font-family:monospace'></label>"
+       "<label>Hue <b id=dhv></b> <span class=nb><button type=button data-n=dh data-d=-1>&minus;</button>"
+       "<button type=button data-n=dh data-d=1>+</button></span><input type=range id=dh min=0 max=359 step=1></label>"
+       "<label>Saturation <b id=dsv></b> <span class=nb><button type=button data-n=ds data-d=-1>&minus;</button>"
+       "<button type=button data-n=ds data-d=1>+</button></span><input type=range id=ds min=0 max=100 step=1></label>"
+       "<label>Brightness <b id=dvv></b> <span class=nb><button type=button data-n=dv data-d=-1>&minus;</button>"
+       "<button type=button data-n=dv data-d=1>+</button></span><input type=range id=dv min=0 max=100 step=1></label>"
        "<label id=dgll>Glow <b id=dgv></b><input type=range id=dgl min=0 max=200 step=5></label>"
        "<label id=dul>Unlit segments <b id=duv></b><input type=range id=dun min=0 max=300 step=5></label>"
        "<button type=button id=dreset>Default colour</button>"
-       "<p class=note>For a deeper colour on the backlit screen, pick a fully saturated one (a picker corner), "
+       "<p class=note>Hue moves green (150\u00b0) towards blue (190\u00b0) one degree at a time. For a deeper colour on the backlit screen, keep saturation at 100%, "
        "turn the glow up and the unlit segments down.</p></div>";
   {
     String dj = "{";
@@ -1318,7 +1355,7 @@ static void handleRoot() {
     }
     dj += "}";
     h += "<style>.sw{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}.sw button{padding:6px 9px;color:#000;border:0;"
-         "border-radius:6px;font-size:13px}</style><script>var DIG=" + dj + ";</script>";
+         "border-radius:6px;font-size:13px}.nb button{padding:1px 9px;margin-left:4px;font-size:14px}input[type=range]{width:100%}</style><script>var DIG=" + dj + ";</script>";
   }
   h += "<label><input type=checkbox name=secs " + String(S.secs ? "checked" : "") + "> Second hand</label>"
        "<label><input type=checkbox name=moon " + String(S.moon ? "checked" : "") + "> Moon phase</label>"
@@ -1333,6 +1370,8 @@ static void handleRoot() {
   }
   if (!tzKnown) h += "<option value=\"" + esc(S.tz) + "\" selected>" + esc(S.tz) + "</option>";
   h += "</select></label>"
+       "<label>Start-up animation (seconds, 0-120)<input type=number min=0 max=120 name=boot value=" + String(S.bootSecs) + "></label>"
+       "<p class=note>After power-on the Matrix rain plays this long before the pictures or the clock. A tap skips it.</p>"
        "<label>Clock brightness (10-255)<input type=number min=10 max=255 name=cbri value=" + String(S.clkBri) + "></label>"
        "<label>At night<select name=night><option value=0" + (S.night == 0 ? " selected" : "") + ">Screen off</option>"
        "<option value=1" + (S.night == 1 ? " selected" : "") + ">Clock, dimmed</option></select></label>"
@@ -1414,6 +1453,7 @@ static void handleSettings() {
     S.clkOff = parseHhmm(web.arg("coff"), S.clkOff);
     if (web.hasArg("cbri")) S.clkBri = constrain(web.arg("cbri").toInt(), 10, 255);
     if (web.hasArg("night")) S.night = constrain(web.arg("night").toInt(), 0, 1);
+    if (web.hasArg("boot")) S.bootSecs = constrain(web.arg("boot").toInt(), 0, 120);
     if (web.hasArg("nbri")) S.nightBri = constrain(web.arg("nbri").toInt(), 5, 255);
     if (web.hasArg("tz") && web.arg("tz").length() && web.arg("tz") != S.tz) { S.tz = web.arg("tz").substring(0, 60); tzChanged = true; }
     xSemaphoreTake(haLock, portMAX_DELAY);
@@ -1711,6 +1751,8 @@ void setup() {
   xTaskCreatePinnedToCore(dialTask, "dial", 8192, nullptr, 1, &dialTaskH, 0);
   applyTz();                          // internet time (keeps trying in the background)
   setupWeb();
+  bootRainUntil = S.bootSecs ? max<uint32_t>(1, S.bootSecs * 1000UL) : 0;   // counted from power-on
+  idleSince = 0;
   showIdle();
 }
 
@@ -1739,7 +1781,7 @@ void loop() {
   {
     bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
     bool picture = live() && on && S.mode != 2;
-    if (!settingUp && !picture && clockWanted()) {
+    if (!settingUp && !picture && !bootRain() && clockWanted()) {
       if (!clockShown) startClock();
       else clockTick();
     } else if (clockShown) {
@@ -1748,7 +1790,7 @@ void loop() {
     }
   }
 
-  if (on && !live() && lastFrameAt && !idleShown && !asleep && !overlayUntil && !clockShown) goDark();   // stream stopped: dark
+  if (on && !live() && lastFrameAt && !idleShown && !asleep && !bootRain() && !overlayUntil && !clockShown) goDark();   // stream stopped: dark
   if (idleShown && on && !overlayUntil && !asleep) {          // the rain keeps falling; panel follows Wi-Fi
     mrStep();
     static uint32_t panelAt = 0;
@@ -1756,7 +1798,7 @@ void loop() {
     // nothing to show for a while (and not setting up): go to sleep until pixels, a photo or a tap
     bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
     if (!idleSince) idleSince = now;
-    if (!settingUp && now - idleSince > IDLE_SLEEP_MS) goDark();   // after power-on: dark until there's something
+    if (!settingUp && !bootRain() && now - idleSince > IDLE_SLEEP_MS) goDark();   // after power-on: dark until there's something
   }
 
   static uint32_t touchAt = 0;
@@ -1766,7 +1808,9 @@ void loop() {
     static uint32_t upAt = 0;
     int t = touched();
     if (t == 1 && !wasDown && now - upAt > 250) {
-      if (asleep) {                                        // dark: the info strip (song, IP) on black
+      if (bootRain() && !(apOn && WiFi.status() != WL_CONNECTED)) {
+        bootRainUntil = 0;                                 // a tap skips the power-on rain
+      } else if (asleep) {                                 // dark: the info strip (song, IP) on black
         if (S.mode && timeOk()) clockPeekUntil = now + CLOCK_PEEK_MS;   // and the clock for a while
         gfx->fillScreen(BLACK); asleep = false; backlight(); showOverlay();
       } else {
