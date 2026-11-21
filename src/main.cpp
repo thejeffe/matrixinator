@@ -69,6 +69,7 @@ static const char *const HA_HINTS[HA_N] = {"sensor.living_room_temperature", "se
                                            "sensor.living_room_humidity", "sensor.outdoor_humidity",
                                            "sensor.outdoor_pressure"};
 
+static void saveSettings();
 static void loadSettings() {
   prefs.begin("mx", true);
   S.ssid = prefs.getString("ssid", "");
@@ -97,15 +98,31 @@ static void loadSettings() {
   S.haToken = prefs.getString("hatok", "");
   for (int i = 0; i < 5; i++) S.haEnt[i] = prefs.getString(HA_KEYS[i], "");
   S.haSea = prefs.getBool("hasea", true);
+  // Face list v2 (holiday faces; Red LED and VFD became one colourable Digital face): move the saved face
+  // and the digital colours from the old numbers to the new ones.
+  int oldOf[clk::FACE_COUNT];                     // new face -> where its settings were saved before
+  for (int f = 0; f < clk::FACE_COUNT; f++) oldOf[f] = f;
+  if (prefs.getInt("fv", 1) < 2) {
+    static const int MAP[11] = {0, 1, 2, 3, 4, 12, 13, 14, 14, 15, 16};   // old face -> new face
+    int old = prefs.getInt("face", 0);
+    S.face = old >= 0 && old < 11 ? MAP[old] : 0;
+    oldOf[14] = old == 7 ? 7 : 8;                 // Digital: the Red LED's colours if that was the face, else VFD's
+    oldOf[15] = 9;
+    oldOf[16] = 10;
+  }
   for (int f = 0; f < clk::FACE_COUNT; f++) {   // digital faces: colour, glow, unlit level
     if (!clk::defaultDigitColor(f)) continue;
-    clk::setDigitColor(f, prefs.getUInt(("dc" + String(f)).c_str(), clk::defaultDigitColor(f)));
-    clk::setDigitLevels(f, prefs.getInt(("dg" + String(f)).c_str(), 100), prefs.getInt(("du" + String(f)).c_str(), 100));
+    String k = String(oldOf[f]);
+    clk::setDigitColor(f, prefs.getUInt(("dc" + k).c_str(), clk::defaultDigitColor(f)));
+    clk::setDigitLevels(f, prefs.getInt(("dg" + k).c_str(), 100), prefs.getInt(("du" + k).c_str(), 100));
   }
+  bool migrate = prefs.getInt("fv", 1) < 2;
   prefs.end();
+  if (migrate) saveSettings();
 }
 static void saveSettings() {
   prefs.begin("mx", false);
+  prefs.putInt("fv", 2);
   prefs.putString("ssid", S.ssid);
   prefs.putString("pass", S.pass);
   prefs.putString("name", S.name);
@@ -819,6 +836,7 @@ static clk::Dial makeDial(time_t now, const tm &t, int face, String *key) {
   int moonStep = (int)(clk::moonPhase(now) * 118);                 // the moon is redrawn about every 6 hours
   d.moonPhase = (moonStep + 0.5f) / 118;
   d.temps = S.ha;
+  d.year = t.tm_year + 1900;
   d.month = t.tm_mon + 1;
   d.mday = t.tm_mday;
   d.wday = t.tm_wday;
@@ -1297,9 +1315,13 @@ static void handleRoot() {
   h += "</select></label><p class=note>Auto: dark when Signinator sends nothing. Auto (with clock): the clock "
        "instead, during the hours below. Clock only: always the clock in those hours, pictures ignored.</p>"
        "<label>Face<select name=face onchange=\"pv.style.opacity=.35;pv.src='/api/clock.jpg?face='+this.value\">";
-  for (int f = 0; f < clk::FACE_COUNT; f++)
+  for (int f = 0; f < clk::FACE_COUNT; f++) {          // grouped: Classic, Holidays, Digital
+    if (!f || strcmp(clk::faceGroup(f), clk::faceGroup(f - 1)))
+      h += String(f ? "</optgroup>" : "") + "<optgroup label=\"" + clk::faceGroup(f) + "\">";
     h += "<option value=" + String(f) + (S.face == f ? " selected>" : ">") + clk::faceName(f) + "</option>";
-  h += "</select></label>"
+  }
+  h += "</optgroup></select></label>"
+       "<p class=note>The holiday faces count down to their day in the window under 12.</p>"
        "<img id=pv alt='Clock preview' src='/api/clock.jpg?face=" + String(S.face) +
        "' onload=\"this.style.opacity=1\" onerror=\"this.style.opacity=1\""
        " style='width:100%;max-width:320px;aspect-ratio:1;display:block;margin:6px auto;border-radius:10px;background:#000;transition:opacity .2s'>"
@@ -1311,7 +1333,7 @@ static void handleRoot() {
        "<button type=button data-c='#ff2c1c' style='background:#ff2c1c'>Red</button>"
        "<button type=button data-c='#ff9a1c' style='background:#ff9a1c'>Amber</button>"
        "<button type=button data-c='#3cff5a' style='background:#3cff5a'>Green</button>"
-       "<button type=button data-c='#00f2c8' style='background:#00f2c8'>VFD</button>"
+       "<button type=button data-c='#00f2c8' style='background:#00f2c8'>Stereo</button>"
        "<button type=button data-c='#00ffe0' style='background:#00ffe0'>Aqua</button>"
        "<button type=button data-c='#2a9dff' style='background:#2a9dff'>Blue</button>"
        "<button type=button data-c='#ffffff' style='background:#fff'>White</button></div>"
@@ -1346,9 +1368,9 @@ static void handleRoot() {
       snprintf(c, sizeof c, "#%06lx", (unsigned long)clk::digitColor(f));
       snprintf(d, sizeof d, "#%06lx", (unsigned long)def);
       if (dj.length() > 1) dj += ",";
-      // gl: has a glow (not Flip); un: has unlit segments (Red LED, VFD)
+      // gl: has a glow (not Flip); un: has unlit segments (Digital)
       dj += String(f) + ":{c:'" + c + "',d:'" + d + "',g:" + clk::digitGlowPct(f) + ",u:" + clk::digitUnlitPct(f) +
-            ",gl:" + (f != clk::FACE_COUNT - 1 ? "1" : "0") + ",un:" + (f <= 8 ? "1" : "0") + "}";
+            ",gl:" + (clk::digitHasGlow(f) ? "1" : "0") + ",un:" + (clk::digitHasUnlit(f) ? "1" : "0") + "}";
       h += "<input type=hidden name=dc" + String(f) + " id=dc" + f + " value='" + c + "'>"
            "<input type=hidden name=dg" + String(f) + " id=dg" + f + " value=" + clk::digitGlowPct(f) + ">"
            "<input type=hidden name=du" + String(f) + " id=du" + f + " value=" + clk::digitUnlitPct(f) + ">";

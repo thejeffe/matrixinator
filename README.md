@@ -23,10 +23,13 @@ and pixels arrive as **DDP on UDP 4048**. Each LED is drawn as a round dot; the 
 
 Faces: **Gatsby** (black and gold sunburst), **Skyline** (steel, a crown of stepped triangles), **Ivory** (cream,
 black chapter ring, jade), **Midnight** (navy and silver, quiet at night), **Grandfather** (silvered chapter ring
-with Roman numerals, brass corners with scrollwork), **Christmas** (candy-cane hands, ornaments, days to
-Christmas), **Advent** (24 doors that open through December, the time as digits), and four digital ones with the
-date, weather and moon: **Red LED** (old-school alarm clock), **VFD** (green vacuum fluorescent, like a 70s stereo), **Nixie**
-(glowing tubes) and **Flip** (flip-clock cards).
+with Roman numerals, brass corners with scrollwork); holiday faces that count down to their day: **New Year**
+(fireworks, confetti, gold stars), **Valentine's** (hearts, heart-tipped hands), **St. Patrick's** (shamrocks, gold
+coins), **Easter** (painted eggs, daisies, a pastel bezel), **July 4th** (stars, fireworks, a red and white bezel),
+**Halloween** (jack-o'-lanterns, bats, a pumpkin glow), **Thanksgiving** (autumn leaves, copper), **Christmas**
+(candy-cane hands, ornaments) and **Advent** (24 doors that open through December, the time as digits); and three
+digital ones with the date, weather and moon: **Digital** (seven segments in any colour: a 70s stereo's green-blue
+by default, or red for an old alarm clock), **Nixie** (glowing tubes) and **Flip** (flip-clock cards).
 Options: second hand, moon phase, clock brightness, time zone (time comes from NTP), and **at night**: screen off
 (a tap shows the clock for 30 s) or the clock dimmed to its own brightness.
 
@@ -35,8 +38,9 @@ entity ids: inside and outside temperature, inside and outside humidity, air pre
 The screen reads `GET /api/states/<entity>` every minute. Temperatures and humidity sit in IN / OUT windows
 either side of the centre; pressure (with HA's unit, e.g. 983 HPA or 29.03 INHG) in a window below 12.
 
-Digital faces (Red LED, VFD, Nixie, Flip) have a **digit colour**, **glow** (0-200 %) and **unlit segments** level
-(0-300 %, Red LED and VFD) on the settings page, each face its own; the preview follows as you change them. Or
+Digital faces (Digital, Nixie, Flip) have a **digit colour** (picker, swatches, hue / saturation / brightness sliders
+in single steps, or a hex code), **glow** (0-200 %) and **unlit segments** level (0-300 %, Digital) on the settings
+page, each face its own; the preview follows as you change them. Or
 `POST /api/clock {"color":"#00ffe0","glow":150,"unlit":50}` for the current face.
 `GET /api/clock.jpg?face=N` is a 240x240 picture of face N with sample weather (the settings page shows it as a preview). The pictures are made ahead of time and built into the firmware: after changing a face, run `tools/preview/make_previews.py` (needs Pillow) to make them again (digital faces also get `&layer=base` and `&layer=mask`, which the page tints with the chosen colour).
 The pressure window shows a barometer word (Stormy, Rain, Change, Fair, Very dry) from the sea-level pressure

@@ -17,9 +17,10 @@ from PIL import Image, ImageChops
 
 here = os.path.dirname(os.path.abspath(__file__))
 src = os.path.join(here, "..", "..", "src")
-names = ["Gatsby", "Skyline", "Ivory", "Midnight", "Grandfather", "Christmas", "Advent",
-         "Red LED", "VFD", "Nixie", "Flip"]   # clock.cpp's face order
-DIGITAL = range(7, 11)
+names = ["Gatsby", "Skyline", "Ivory", "Midnight", "Grandfather", "New Year", "Valentine's", "St. Patrick's",
+         "Easter", "July 4th", "Halloween", "Thanksgiving", "Christmas", "Advent",
+         "Digital", "Nixie", "Flip"]   # clock.cpp's face order
+DIGITAL = range(14, 17)
 GRAY = 128
 
 

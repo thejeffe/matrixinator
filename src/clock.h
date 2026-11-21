@@ -10,10 +10,13 @@
 namespace clk {
 
 static const int W = 480, H = 480;
-static const int FACE_COUNT = 11;
+static const int FACE_COUNT = 17;
 
-const char *faceName(int face);          // Gatsby, Skyline, Ivory, Midnight, Grandfather, Christmas, Advent,
-                                         // Red LED, VFD, Nixie, Flip
+const char *faceName(int face);          // Gatsby, Skyline, Ivory, Midnight, Grandfather, New Year, Valentine's,
+                                         // St. Patrick's, Easter, July 4th, Halloween, Thanksgiving, Christmas,
+                                         // Advent, Digital, Nixie, Flip
+const char *faceGroup(int face);         // "Classic", "Holidays" or "Digital" (for the settings page's list)
+int holidayOf(int face);                 // which holiday a face is for (1..8, 0 = none): the countdown
 bool faceHasSeconds(int face);           // false: the face never shows seconds (Advent)
 
 struct Dial {
@@ -26,7 +29,8 @@ struct Dial {
   char pres[16] = "";                    // e.g. "983 HPA", "29.03 INHG", or "" = no pressure window
   char presWord[12] = "";                // barometer word: "STORMY", "RAIN", "CHANGE", "FAIR", "VERY DRY"
   int presTrend = 0;                     // 1 rising, -1 falling, 0 steady (an arrow after the number)
-  int month = 0, mday = 0, wday = 0;     // today (1-12, 1-31, 0 = Sunday): Advent opens doors by it, digital shows it
+  int year = 0, month = 0, mday = 0, wday = 0;   // today (2026, 1-12, 1-31, 0 = Sunday): Advent opens doors by
+                                         // it, digital shows it, the holiday faces count down to their day
   int daysToXmas = -1;                   // 0 on Christmas Day; the Christmas and Advent faces count down
 };
 
@@ -45,12 +49,17 @@ void drawMinuteLayer(uint16_t *buf, int face, int hour24, int minute);
 void drawSecondLayer(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);
 void drawHands(uint16_t *buf, int face, float hour, float minute, float second, bool showSeconds);   // both
 
-// The lit colour (0xRRGGBB) of a digital face (Red LED, VFD, Nixie, Flip; 0 for the others). The glow, unlit
+// Whole days from the dial's date to the next day of holiday h (0 on the day; -1 without a date).
+int daysToHoliday(const Dial &d, int h);
+
+// The lit colour (0xRRGGBB) of a digital face (Digital, Nixie, Flip; 0 for the others). The glow, unlit
 // segments and text follow it. Draws use it from then on (baseKey changes with it).
 uint32_t digitColor(int face);
 uint32_t defaultDigitColor(int face);
 void setDigitColor(int face, uint32_t rgb);
-// Glow around lit digits and text (0-200 %), and how bright the unlit segments are (0-300 %; Red LED, VFD).
+// Glow around lit digits and text (0-200 %; not Flip), and how bright the unlit segments are (0-300 %; Digital).
+bool digitHasGlow(int face);
+bool digitHasUnlit(int face);
 void setDigitLevels(int face, int glowPct, int unlitPct);
 int digitGlowPct(int face);
 int digitUnlitPct(int face);

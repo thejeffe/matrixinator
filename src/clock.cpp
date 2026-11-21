@@ -13,7 +13,10 @@ namespace clk {
 
 static const float CX = W / 2.0f, CY = H / 2.0f;
 // The faces, in the order the settings page lists them.
-enum { F_GATSBY, F_SKYLINE, F_IVORY, F_MIDNIGHT, F_GRANDFATHER, F_CHRISTMAS, F_ADVENT, F_LED, F_VFD, F_NIXIE, F_FLIP };
+enum { F_GATSBY, F_SKYLINE, F_IVORY, F_MIDNIGHT, F_GRANDFATHER,
+       F_NEWYEAR, F_VALENTINE, F_PATRICK, F_EASTER, F_JULY4, F_HALLOWEEN, F_THANKS, F_CHRISTMAS, F_ADVENT,
+       F_LED, F_NIXIE, F_FLIP };
+static_assert(F_FLIP + 1 == FACE_COUNT, "clock.h FACE_COUNT");
 static void (*yieldFn)() = nullptr;
 void setYield(void (*fn)()) { yieldFn = fn; }
 static const float PI2 = 6.28318531f;
@@ -43,12 +46,14 @@ struct Seg { float ax, ay, bx, by, r; };
 struct Disc { float x, y, r; };
 struct Box { float x, y, hx, hy, rr; };
 struct Poly { int n; float x[8], y[8], nx[8], ny[8], c[8]; };
+struct Ell { float x, y, rx, ry, ca, sa; };   // turned by an angle (cos, sin)
 
 struct Shape {
   std::vector<Seg> segs;
   std::vector<Disc> discs;
   std::vector<Box> boxes;
   std::vector<Poly> polys;
+  std::vector<Ell> ells;
   float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
   void grow(float x, float y, float r) {
     if (x - r < x0) x0 = x - r;
@@ -62,6 +67,9 @@ struct Shape {
   void disc(float x, float y, float r) { discs.push_back({x, y, r}); grow(x, y, r); }
   void box(float x, float y, float hx, float hy, float rr) {
     boxes.push_back({x, y, hx, hy, rr}); grow(x - hx, y - hy, 0); grow(x + hx, y + hy, 0);
+  }
+  void ell(float x, float y, float rx, float ry, float rot = 0) {
+    ells.push_back({x, y, rx, ry, cosf(rot), sinf(rot)}); grow(x, y, rx > ry ? rx : ry);
   }
   void poly(const float *px, const float *py, int n) {   // convex, either winding
     Poly p;
@@ -98,6 +106,13 @@ struct Shape {
       float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
       float in = qx > qy ? qx : qy;
       float v = sqrtf(ox * ox + oy * oy) + (in < 0 ? in : 0) - b.rr;
+      if (v < d) d = v;
+    }
+    for (const Ell &e : ells) {          // close to the true distance near the edge (good enough for coverage)
+      float dx = px - e.x, dy = py - e.y, u = dx * e.ca + dy * e.sa, w = -dx * e.sa + dy * e.ca;
+      float ux = u / e.rx, wy = w / e.ry, k0 = sqrtf(ux * ux + wy * wy);
+      float k1 = sqrtf(ux * ux / (e.rx * e.rx) + wy * wy / (e.ry * e.ry));
+      float v = k1 > 1e-6f ? k0 * (k0 - 1) / k1 : -(e.rx < e.ry ? e.rx : e.ry);
       if (v < d) d = v;
     }
     for (const Poly &p : polys) {
@@ -273,6 +288,7 @@ static const Glyph &glyph(char ch) {
       g['%'] = {6, {{0.4f, 10, 5.6f, 0}, a, b}};
     }
     g['.'] = {0, {{0, 9.7f, 0, 9.7f}}};
+    g['\''] = {0, {{0, 0, 0, 2.6f}}};
     g['{'] = {4, {{2, 10, 2, 0.4f}, {0, 2.6f, 2, 0.4f, 4, 2.6f}}};     // arrow up
     g['}'] = {4, {{2, 0, 2, 9.6f}, {0, 7.4f, 2, 9.6f, 4, 7.4f}}};    // arrow down
     g[':'] = {0, {{0, 2.8f, 0, 2.8f}, {0, 8.2f, 0, 8.2f}}};
@@ -364,14 +380,34 @@ static const Theme THEMES[FACE_COUNT] = {
     // Grandfather: silvered chapter ring on a brass plate, black hands
     {{30, 26, 22}, {96, 76, 44}, {238, 234, 222}, {40, 34, 28}, {245, 236, 205}, {40, 48, 80},
      {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {26, 23, 20}, {200, 160, 80}},
+    // New Year: midnight and gold, fireworks
+    {{240, 206, 120}, {190, 196, 214}, {8, 8, 18}, {212, 172, 84}, {238, 232, 210}, {26, 26, 40},
+     {236, 204, 120}, {80, 60, 20}, {226, 80, 120}, {236, 204, 120}, {40, 30, 14}},
+    // Valentine's: red and pink, hearts
+    {{255, 226, 232}, {255, 170, 196}, {74, 6, 26}, {244, 170, 170}, {255, 240, 236}, {70, 20, 34},
+     {252, 240, 242}, {110, 14, 38}, {246, 206, 110}, {252, 240, 242}, {150, 20, 50}},
+    // St. Patrick's: green and gold, shamrocks
+    {{244, 214, 120}, {200, 236, 190}, {6, 40, 18}, {212, 172, 84}, {244, 244, 220}, {18, 50, 30},
+     {244, 214, 120}, {70, 50, 14}, {246, 146, 50}, {244, 214, 120}, {20, 60, 30}},
+    // Easter: pastel lilac, eggs
+    {{92, 52, 116}, {150, 96, 160}, {250, 246, 252}, {150, 110, 180}, {252, 248, 230}, {130, 120, 160},
+     {96, 56, 120}, {96, 56, 120}, {232, 104, 156}, {96, 56, 120}, {250, 220, 120}},
+    // July 4th: navy, red and white, stars
+    {{248, 248, 250}, {180, 200, 255}, {8, 14, 44}, {236, 236, 240}, {244, 244, 236}, {24, 30, 64},
+     {248, 248, 250}, {150, 20, 32}, {230, 40, 52}, {248, 248, 250}, {200, 30, 44}},
+    // Halloween: purple dark, a pumpkin glow, bats
+    {{255, 160, 50}, {200, 150, 230}, {16, 6, 22}, {255, 140, 30}, {252, 240, 200}, {40, 20, 40},
+     {236, 228, 206}, {26, 10, 20}, {140, 230, 70}, {236, 228, 206}, {26, 10, 20}},
+    // Thanksgiving: harvest brown, autumn leaves
+    {{250, 232, 196}, {236, 176, 90}, {50, 24, 10}, {210, 140, 70}, {252, 240, 210}, {60, 34, 20},
+     {250, 236, 210}, {60, 30, 10}, {236, 110, 34}, {250, 236, 210}, {120, 56, 20}},
     // Christmas: green, candy-cane hands, ornaments
     {{244, 214, 120}, {236, 236, 236}, {10, 44, 24}, {222, 182, 92}, {250, 245, 220}, {20, 50, 35},
      {252, 252, 252}, {120, 20, 24}, {244, 204, 96}, {204, 30, 40}, {244, 204, 96}},
     // Advent: red, 24 doors, the time as digits
     {{244, 214, 120}, {250, 236, 210}, {60, 10, 14}, {222, 182, 92}, {250, 245, 220}, {40, 20, 20},
      {244, 214, 120}, {60, 10, 14}, {244, 214, 120}, {244, 214, 120}, {60, 10, 14}},
-    // Red LED, VFD, Nixie, Flip: digital (only the moon colours are used)
-    {{230, 46, 34}, {140, 26, 20}, {0, 0, 0}, {0, 0, 0}, {255, 120, 90}, {40, 8, 6}, {}, {}, {}, {}, {}},
+    // Digital, Nixie, Flip (only the moon colours are used)
     {{116, 236, 214}, {60, 140, 130}, {0, 0, 0}, {0, 0, 0}, {160, 255, 236}, {10, 34, 32}, {}, {}, {}, {}, {}},
     {{255, 164, 96}, {170, 110, 70}, {0, 0, 0}, {0, 0, 0}, {255, 190, 120}, {50, 32, 24}, {}, {}, {}, {}, {}},
     {{206, 206, 200}, {130, 130, 130}, {0, 0, 0}, {0, 0, 0}, {236, 232, 216}, {50, 50, 54}, {}, {}, {}, {}, {}},
@@ -508,8 +544,7 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {222, 182, 92}, band(edge, 10, 11));
           break;
         }
-        case F_LED:
-        case F_VFD: {  // black plastic
+        case F_LED: {  // black plastic
           float t = (y + 0.5f) / H;
           c = mix({26, 24, 24}, {6, 6, 6}, t);
           break;
@@ -523,6 +558,84 @@ static void background(uint16_t *buf, int face) {
         case F_FLIP: {
           float t = r / 340;
           c = mix({40, 40, 44}, {14, 14, 16}, t);
+          break;
+        }
+        case F_NEWYEAR: {  // New Year: midnight blue-black, faint gold rays, a gold bezel
+          float t = r / 222;
+          c = mix({22, 20, 44}, {4, 4, 12}, t);
+          c = mix(c, mul(c, 1.35f), wedge(a, r, 72) * clamp01((r - 30) / 60) * 0.6f);
+          c = mix(c, GOLD, band(r, 218.5f, 221.5f));
+          c = mix(c, {4, 4, 8}, band(r, 221.5f, 226));
+          if (r > 225 && r < 239) c = mix(c, metal(GOLD, r, 226, 238, a), band(r, 226, 238));
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_VALENTINE: {  // Valentine's: deep red, soft pink rays, rose gold
+          float t = r / 222;
+          c = mix({190, 32, 64}, {90, 8, 32}, t * t);
+          c = mix(c, mix(c, {255, 130, 170}, 0.12f), wedge(a, r, 36) * clamp01((r - 30) / 50));
+          c = mix(c, {255, 196, 210}, band(r, 218.5f, 221));
+          c = mix(c, {50, 4, 18}, band(r, 221, 226));
+          if (r > 225 && r < 239) c = mix(c, metal({226, 160, 150}, r, 226, 238, a), band(r, 226, 238));
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_PATRICK: {  // St. Patrick's: emerald, faint rays, gold
+          float t = r / 222;
+          c = mix({34, 130, 66}, {6, 54, 26}, t * t);
+          c = mix(c, mul(c, 1.14f), wedge(a, r, 48) * clamp01((r - 30) / 50));
+          c = mix(c, GOLD, band(r, 218.5f, 221.5f));
+          c = mix(c, {4, 24, 10}, band(r, 221.5f, 226));
+          if (r > 225 && r < 239) c = mix(c, metal(GOLD, r, 226, 238, a), band(r, 226, 238));
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_EASTER: {  // Easter: pale lilac, a pastel-striped bezel
+          float t = r / 222;
+          c = mix({246, 240, 252}, {206, 192, 236}, t * t);
+          c = mix(c, {150, 110, 180}, band(r, 218, 220));
+          if (r > 220) {
+            static const C3 pas[4] = {{250, 170, 200}, {252, 228, 130}, {150, 226, 190}, {150, 196, 246}};
+            float u = a / PI2 * 32 + (r - 222) / 16 * 0.5f, f = u - floorf(u);
+            int i = ((int)floorf(u)) & 3;
+            float e = fminf(f, 1 - f) * PI2 * r / 32;                    // pixels to the stripe edge
+            C3 s = mix(mix(pas[i], pas[(i + (f < 0.5f ? 3 : 1)) & 3], 0.5f), pas[i], clamp01(e + 0.5f));
+            if (r < 239) c = mix(c, metal(s, r, 222, 238, a + 0.8f), band(r, 222, 238));
+          }
+          c = mix(c, {16, 12, 22}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_JULY4: {  // July 4th: navy, a red and white striped bezel
+          float t = r / 222;
+          c = mix({30, 44, 110}, {8, 14, 50}, t * t);
+          c = mix(c, {236, 236, 240}, band(r, 218, 221));
+          if (r > 221) {
+            float u = a / PI2 * 26, f = u - floorf(u);
+            float dd = f < 0.5f ? fminf(f, 0.5f - f) : -fminf(f - 0.5f, 1 - f);   // >0 inside a red stripe
+            C3 st = mix({246, 246, 244}, {204, 30, 44}, clamp01(dd * PI2 * r / 26 + 0.5f));
+            if (r < 239) c = mix(c, metal(st, r, 222, 238, a), band(r, 222, 238));
+          }
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_HALLOWEEN: {  // Halloween: purple dark in the middle, a pumpkin-orange glow round the edge, iron
+          float t = r / 216;
+          C3 in = mix({22, 6, 32}, {58, 14, 70}, clamp01(t / 0.55f));
+          float glow = clamp01((t - 0.5f) / 0.38f);
+          c = mix(in, {226, 104, 18}, glow * glow * (3 - 2 * glow));
+          c = mix(c, {40, 10, 16}, clamp01((r - 206) / 12));
+          if (r > 222 && r < 239) c = mix(c, metal({110, 96, 118}, r, 224, 238, a), band(r, 224, 238));
+          c = mix(c, {3, 2, 4}, clamp01(r - 238 + 0.5f));
+          break;
+        }
+        case F_THANKS: {  // Thanksgiving: warm brown, harvest rays, copper
+          float t = r / 222;
+          c = mix({156, 90, 40}, {78, 36, 14}, t * t);
+          c = mix(c, mul(c, 1.12f), wedge(a, r, 40) * clamp01((r - 30) / 50));
+          c = mix(c, {240, 210, 150}, band(r, 218.5f, 221));
+          c = mix(c, {40, 18, 6}, band(r, 221, 226));
+          if (r > 225 && r < 239) c = mix(c, metal({200, 124, 66}, r, 226, 238, a), band(r, 226, 238));
+          c = mix(c, {3, 3, 3}, clamp01(r - 238 + 0.5f));
           break;
         }
         default: {  // Midnight: navy, a fan of fine lines
@@ -597,18 +710,416 @@ static void xmasLines(int days, char *l1, char *l2, size_t n) {
   else { snprintf(l1, n, "%d DAYS", days); snprintf(l2, n, "TO CHRISTMAS"); }
 }
 
-static void countdownWindow(uint16_t *buf, const Theme &t, int days) {
+// ---------- holidays: the dates, the countdown window and the decorations ----------
+enum { H_NONE, H_NEWYEAR, H_VALENTINE, H_PATRICK, H_EASTER, H_JULY4, H_HALLOWEEN, H_THANKS, H_XMAS };
+int holidayOf(int f) {
+  switch (f) {
+    case F_NEWYEAR: return H_NEWYEAR;
+    case F_VALENTINE: return H_VALENTINE;
+    case F_PATRICK: return H_PATRICK;
+    case F_EASTER: return H_EASTER;
+    case F_JULY4: return H_JULY4;
+    case F_HALLOWEEN: return H_HALLOWEEN;
+    case F_THANKS: return H_THANKS;
+    case F_CHRISTMAS: case F_ADVENT: return H_XMAS;
+    default: return H_NONE;
+  }
+}
+static long dayNumber(int y, int m, int d) {          // days since 1970-01-01 (proleptic Gregorian)
+  y -= m <= 2;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  long yoe = y - era * 400, doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+}
+static void holidayDate(int h, int y, int &m, int &d) {
+  switch (h) {
+    case H_NEWYEAR: m = 1; d = 1; break;
+    case H_VALENTINE: m = 2; d = 14; break;
+    case H_PATRICK: m = 3; d = 17; break;
+    case H_EASTER: {                                   // the anonymous Gregorian computus
+      int a = y % 19, b = y / 100, c = y % 100, e = (19 * a + b - b / 4 - (b - (8 * b + 13) / 25) + 15) % 30;
+      int l = (32 + 2 * (b % 4) + 2 * (c / 4) - e - c % 4) % 7, k = (a + 11 * e + 19 * l) / 433;
+      m = (e + l - 7 * k + 90) / 25; d = (e + l - 7 * k + 33 * m + 19) % 32;
+      break;
+    }
+    case H_JULY4: m = 7; d = 4; break;
+    case H_HALLOWEEN: m = 10; d = 31; break;
+    case H_THANKS: {                                   // the fourth Thursday in November
+      int w = (int)((dayNumber(y, 11, 1) % 7 + 11) % 7);   // 0 = Sunday (1970-01-01 was a Thursday)
+      m = 11; d = 1 + (4 - w + 7) % 7 + 21;
+      break;
+    }
+    default: m = 12; d = 25; break;
+  }
+}
+int daysToHoliday(const Dial &d, int h) {
+  if (h == H_NONE || d.month < 1) return -1;
+  if (d.year < 1900) return h == H_XMAS ? d.daysToXmas : -1;
+  long today = dayNumber(d.year, d.month, d.mday);
+  for (int y = d.year; y <= d.year + 1; y++) {
+    int m, dd;
+    holidayDate(h, y, m, dd);
+    long t = dayNumber(y, m, dd);
+    if (t >= today) return (int)(t - today);
+  }
+  return -1;
+}
+// Two lines: "12 DAYS" / "TO HALLOWEEN", or on the day "HAPPY" / "HALLOWEEN!".
+static void holidayLines(int h, int days, char *l1, char *l2, size_t n) {
+  static const char *to[] = {"", "TO NEW YEAR", "TO VALENTINE'S", "TO ST. PATRICK'S", "TO EASTER", "TO JULY 4TH",
+                             "TO HALLOWEEN", "TO THANKSGIVING", "TO CHRISTMAS"};
+  static const char *day[] = {"", "NEW YEAR!", "VALENTINE'S DAY", "ST. PATRICK'S DAY", "EASTER!", "4TH OF JULY!",
+                              "HALLOWEEN!", "THANKSGIVING!", "CHRISTMAS!"};
+  if (days == 0) { snprintf(l1, n, h == H_XMAS ? "MERRY" : "HAPPY"); snprintf(l2, n, "%s", day[h]); }
+  else if (days == 1) { snprintf(l1, n, "1 DAY"); snprintf(l2, n, "%s", to[h]); }
+  else { snprintf(l1, n, "%d DAYS", days); snprintf(l2, n, "%s", to[h]); }
+}
+static void countdownWindow(uint16_t *buf, const Theme &t, int h, int days) {
   char l1[24], l2[24];
-  xmasLines(days, l1, l2, sizeof l1);
+  holidayLines(h, days, l1, l2, sizeof l1);
   const float x = CX, y = CY - 94;
-  Shape win, a, b;
-  win.box(x, y, 64, 24, 10);
+  Shapes a, b;
   text(a, l1, x, y - 6, 17, 2.8f, 2.0f);
   text(b, l2, x, y + 14, 8, 1.6f, 1.8f);
+  float x0 = 1e9f, x1 = -1e9f;
+  for (auto *v : {&a, &b})
+    for (auto &g : *v) { x0 = fminf(x0, g.x0); x1 = fmaxf(x1, g.x1); }
+  Shape win;
+  win.box(x, y, fmaxf(64, (x1 - x0) / 2 + 12), 24, 10);
   fill(buf, win, t.windowEdge, 1, 1.5f);
   fill(buf, win, t.window);
-  fill(buf, a, t.ink);
-  fill(buf, b, t.label);
+  fillAll(buf, a, t.ink);
+  fillAll(buf, b, t.label);
+}
+
+// Turn (u, v) by angle `rot` (clockwise) about (x, y): v is "down" when rot = 0.
+struct Frame {
+  float x, y, c, s, k;
+  Frame(float x_, float y_, float rot, float size) : x(x_), y(y_), c(cosf(rot)), s(sinf(rot)), k(size) {}
+  float X(float u, float v) const { return x + (u * c - v * s) * k; }
+  float Y(float u, float v) const { return y + (u * s + v * c) * k; }
+};
+// A heart about 2 x 2 units, its point down (towards +v).
+static void heart(Shape &sh, const Frame &f) {
+  sh.disc(f.X(-0.5f, -0.3f), f.Y(-0.5f, -0.3f), 0.55f * f.k);
+  sh.disc(f.X(0.5f, -0.3f), f.Y(0.5f, -0.3f), 0.55f * f.k);
+  float x[4] = {f.X(-1.02f, -0.12f), f.X(0, -0.2f), f.X(1.02f, -0.12f), f.X(0, 1.0f)};
+  float y[4] = {f.Y(-1.02f, -0.12f), f.Y(0, -0.2f), f.Y(1.02f, -0.12f), f.Y(0, 1.0f)};
+  sh.poly(x, y, 4);
+}
+// A five-pointed star, radius 1 unit, a point up.
+static void star(Shape &sh, const Frame &f) {
+  float px5[5], py5[5];
+  for (int i = 0; i < 5; i++) { float an = (i + 0.5f) * PI2 / 5; px5[i] = f.X(0.4f * sinf(an), -0.4f * cosf(an)); py5[i] = f.Y(0.4f * sinf(an), -0.4f * cosf(an)); }
+  sh.poly(px5, py5, 5);
+  for (int i = 0; i < 5; i++) {
+    float an = i * PI2 / 5;
+    float tx[3] = {f.X(sinf(an), -cosf(an)), px5[(i + 4) % 5], px5[i]}, ty[3] = {f.Y(sinf(an), -cosf(an)), py5[(i + 4) % 5], py5[i]};
+    sh.poly(tx, ty, 3);
+  }
+}
+// Three heart leaves and a stem.
+static void shamrock(Shape &leaves, Shape &stem, const Frame &f) {
+  for (int i = 0; i < 3; i++) {
+    float an = i * PI2 / 3, ux = 0.58f * sinf(an), vy = -0.58f * cosf(an);
+    heart(leaves, Frame(f.X(ux, vy), f.Y(ux, vy), atan2f(f.s, f.c) + an, f.k * 0.58f));
+  }
+  stem.seg(f.X(0, 0.1f), f.Y(0, 0.1f), f.X(0.25f, 0.75f), f.Y(0.25f, 0.75f), 0.11f * f.k);
+  stem.seg(f.X(0.25f, 0.75f), f.Y(0.25f, 0.75f), f.X(0.5f, 1.15f), f.Y(0.5f, 1.15f), 0.1f * f.k);
+}
+// Fireworks: n sparks out from (x, y), r long, with a bright tip.
+static void burst(uint16_t *buf, float x, float y, float r, int n, C3 col, float phase) {
+  Shape lines, tips;
+  for (int i = 0; i < n; i++) {
+    float an = (i + phase) * PI2 / n, len = r * (i % 2 ? 0.78f : 1.0f);
+    lines.seg(x + sinf(an) * r * 0.25f, y - cosf(an) * r * 0.25f, x + sinf(an) * len * 0.86f, y - cosf(an) * len * 0.86f, 1.0f);
+    tips.disc(x + sinf(an) * len, y - cosf(an) * len, 1.8f);
+  }
+  fill(buf, tips, col, 0.5f, 2, 5);
+  fill(buf, lines, col, 0.8f);
+  fill(buf, tips, mix(col, {255, 255, 255}, 0.5f));
+}
+// A jack-o'-lantern, about 2 units wide.
+static void pumpkin(uint16_t *buf, float x, float y, float k) {
+  Shape body, ribs, stem, face;
+  body.ell(x, y, 0.62f * k, 0.78f * k);
+  body.ell(x - 0.42f * k, y + 0.03f * k, 0.55f * k, 0.72f * k);
+  body.ell(x + 0.42f * k, y + 0.03f * k, 0.55f * k, 0.72f * k);
+  ribs.ell(x - 0.32f * k, y + 0.02f * k, 0.08f * k, 0.66f * k);
+  ribs.ell(x + 0.32f * k, y + 0.02f * k, 0.08f * k, 0.66f * k);
+  stem.box(x + 0.04f * k, y - 0.84f * k, 0.11f * k, 0.2f * k, 0.05f * k);
+  float ex[3] = {x - 0.48f * k, x - 0.14f * k, x - 0.31f * k}, ey[3] = {y - 0.1f * k, y - 0.1f * k, y - 0.4f * k};
+  face.poly(ex, ey, 3);
+  float fx[3] = {x + 0.14f * k, x + 0.48f * k, x + 0.31f * k};
+  face.poly(fx, ey, 3);
+  float mx[6] = {x - 0.6f * k, x + 0.6f * k, x + 0.46f * k, x + 0.2f * k, x - 0.2f * k, x - 0.46f * k};
+  float my[6] = {y + 0.12f * k, y + 0.12f * k, y + 0.38f * k, y + 0.5f * k, y + 0.5f * k, y + 0.38f * k};
+  face.poly(mx, my, 6);
+  fill(buf, body, {0, 0, 0}, 0.45f, 0, 5, 2, 3);
+  fill(buf, body, {120, 44, 6}, 1, 1.2f);
+  fill(buf, body, {246, 128, 24});
+  fill(buf, ribs, {206, 96, 14}, 0.8f);
+  fill(buf, stem, {70, 90, 30});
+  fill(buf, face, {255, 220, 90}, 0.5f, 1.5f, 3);
+  fill(buf, face, {255, 236, 140});
+}
+// A bat, about 2 units wide.
+static void bat(Shape &sh, float x, float y, float k) {
+  sh.ell(x, y, 0.16f * k, 0.28f * k);
+  sh.disc(x, y - 0.3f * k, 0.13f * k);
+  for (int sd = -1; sd <= 1; sd += 2) {
+    float ex[3] = {x + sd * 0.04f * k, x + sd * 0.12f * k, x + sd * 0.15f * k}, ey[3] = {y - 0.36f * k, y - 0.54f * k, y - 0.3f * k};
+    sh.poly(ex, ey, 3);
+    float wx[4] = {x, x + sd * 0.55f * k, x + sd * 0.62f * k, x + sd * 0.2f * k}, wy[4] = {y - 0.18f * k, y - 0.36f * k, y + 0.06f * k, y + 0.12f * k};
+    sh.poly(wx, wy, 4);
+    float vx[4] = {x + sd * 0.5f * k, x + sd * 1.0f * k, x + sd * 0.95f * k, x + sd * 0.58f * k}, vy[4] = {y - 0.36f * k, y - 0.2f * k, y + 0.16f * k, y + 0.06f * k};
+    sh.poly(vx, vy, 4);
+  }
+}
+// An autumn leaf: three lobes, veins and a stem; it points along `rot`.
+static void leaf(uint16_t *buf, const Frame &f, C3 col) {
+  Shape lf, vein;
+  lf.ell(f.X(0, -0.2f), f.Y(0, -0.2f), 0.42f * f.k, 0.78f * f.k, atan2f(f.s, f.c));
+  for (int sd = -1; sd <= 1; sd += 2) {
+    float an = atan2f(f.s, f.c) + sd * 0.95f;
+    lf.ell(f.X(sd * 0.42f, 0.02f), f.Y(sd * 0.42f, 0.02f), 0.3f * f.k, 0.55f * f.k, an);
+  }
+  vein.seg(f.X(0, 0.75f), f.Y(0, 0.75f), f.X(0, -0.82f), f.Y(0, -0.82f), 0.06f * f.k);
+  vein.seg(f.X(0, 0.2f), f.Y(0, 0.2f), f.X(-0.62f, -0.22f), f.Y(-0.62f, -0.22f), 0.045f * f.k);
+  vein.seg(f.X(0, 0.2f), f.Y(0, 0.2f), f.X(0.62f, -0.22f), f.Y(0.62f, -0.22f), 0.045f * f.k);
+  fill(buf, lf, {0, 0, 0}, 0.4f, 0, 4, 2, 3);
+  fill(buf, lf, mul(col, 0.55f), 1, 1);
+  fill(buf, lf, col);
+  fill(buf, vein, mul(col, 0.6f));
+}
+// A painted egg, 1.4 x 2 units, its top along `rot`; a zigzag band and dots.
+static void egg(uint16_t *buf, const Frame &f, C3 col, C3 band) {
+  Shape e, zz, dots;
+  e.ell(f.X(0, 0.05f), f.Y(0, 0.05f), 0.7f * f.k, 0.95f * f.k, atan2f(f.s, f.c));
+  for (int i = 0; i < 6; i++) {
+    float u0 = -0.6f + i * 0.2f, u1 = u0 + 0.2f, v0 = i % 2 ? 0.1f : -0.1f, v1 = i % 2 ? -0.1f : 0.1f;
+    zz.seg(f.X(u0, v0), f.Y(u0, v0), f.X(u1, v1), f.Y(u1, v1), 0.07f * f.k);
+  }
+  for (int i = -1; i <= 1; i++) dots.disc(f.X(i * 0.32f, -0.5f + (i ? 0.08f : 0)), f.Y(i * 0.32f, -0.5f + (i ? 0.08f : 0)), 0.08f * f.k);
+  for (int i = -1; i <= 1; i += 2) dots.disc(f.X(i * 0.24f, 0.55f), f.Y(i * 0.24f, 0.55f), 0.08f * f.k);
+  fill(buf, e, {60, 40, 80}, 0.3f, 0, 4, 2, 3);
+  fill(buf, e, col);
+  fill(buf, zz, band);
+  fill(buf, dots, band);
+  Shape shine;
+  shine.ell(f.X(-0.3f, -0.35f), f.Y(-0.3f, -0.35f), 0.12f * f.k, 0.22f * f.k, atan2f(f.s, f.c) + 0.4f);
+  fill(buf, shine, {255, 255, 255}, 0.45f);
+}
+// A daisy: white petals round a yellow middle.
+static void daisy(uint16_t *buf, float x, float y, float k) {
+  Shape p, m;
+  for (int i = 0; i < 8; i++) { float an = i * PI2 / 8; p.ell(x + sinf(an) * 0.55f * k, y - cosf(an) * 0.55f * k, 0.2f * k, 0.42f * k, -an); }
+  m.disc(x, y, 0.3f * k);
+  fill(buf, p, {150, 120, 170}, 0.35f, 1, 2);
+  fill(buf, p, {255, 255, 255});
+  fill(buf, m, {250, 206, 70});
+}
+// Clear of the windows (countdown at the top, temperatures at the sides, moon below) and the 12 3 6 9.
+static bool clearSpot(float x, float y, float pad) {
+  float dx = x - CX, dy = y - CY;
+  if (fabsf(dx) < 96 + pad && fabsf(dy + 94) < 26 + pad) return false;
+  if (fabsf(fabsf(dx) - 96) < 42 + pad && fabsf(dy) < 46 + pad) return false;
+  if (dx * dx + (dy - 108) * (dy - 108) < (32 + pad) * (32 + pad)) return false;
+  for (int q = 0; q < 4; q++) {
+    float a = q * PI2 / 4, qx = sinf(a) * 172, qy = -cosf(a) * 172;
+    if ((dx - qx) * (dx - qx) + (dy - qy) * (dy - qy) < (26 + pad) * (26 + pad)) return false;
+  }
+  float r = sqrtf(dx * dx + dy * dy);
+  return r > 40 + pad && r < 214 - pad && (r < 180 - pad || r > 204 + pad);   // not on the hour marks
+}
+// Spots spread round the dial, the same every time.
+static int scatter(float *xs, float *ys, int want, float pad, unsigned seed) {
+  int n = 0;
+  for (int tries = 0; tries < 600 && n < want; tries++) {
+    seed = seed * 1103515245u + 12345u;
+    float a = (seed >> 8 & 0xFFFF) / 65536.0f * PI2;
+    seed = seed * 1103515245u + 12345u;
+    float r = 44 + (seed >> 8 & 0xFFFF) / 65536.0f * 168;
+    float x = px(a, r), y = py(a, r);
+    if (!clearSpot(x, y, pad)) continue;
+    bool near = false;
+    for (int i = 0; i < n && !near; i++) near = (xs[i] - x) * (xs[i] - x) + (ys[i] - y) * (ys[i] - y) < (pad * 2 + 20) * (pad * 2 + 20);
+    if (near) continue;
+    xs[n] = x; ys[n] = y; n++;
+  }
+  return n;
+}
+
+// The holiday faces: something at each hour that isn't 12 3 6 9, minute dots, the 12 3 6 9, and a few extras.
+static void quarterNumerals(uint16_t *buf, C3 col, C3 edge, float edgeGrow) {
+  Shapes nums;
+  const char *q[4] = {"12", "3", "6", "9"};
+  for (int i = 0; i < 4; i++) {
+    float a = i * PI2 / 4;
+    text(add(nums), q[i], px(a, 172), py(a, 172), 40, 5.5f, 2.4f);
+  }
+  fillAll(buf, nums, {0, 0, 0}, 0.45f, 1.5f, 3);
+  if (edgeGrow > 0) fillAll(buf, nums, edge, 1, edgeGrow);
+  fillAll(buf, nums, col);
+}
+static void minuteDots(uint16_t *buf, C3 col, float r = 211, float size = 1.3f) {
+  Shapes ticks;
+  for (int m = 0; m < 60; m++)
+    if (m % 5) add(ticks).disc(px(m * PI2 / 60, r), py(m * PI2 / 60, r), size);
+  fillAll(buf, ticks, col);
+}
+static void holidayMarkers(uint16_t *buf, int face) {
+  const float H12 = PI2 / 12;
+  float xs[24], ys[24];
+  switch (face) {
+    case F_NEWYEAR: {
+      static const C3 cf[4] = {{240, 206, 120}, {210, 214, 230}, {240, 120, 170}, {120, 170, 250}};
+      int n = scatter(xs, ys, 22, 3, 2027);
+      for (int i = 0; i < n; i++) {                        // confetti
+        Shape q;
+        Frame f(xs[i], ys[i], i * 1.3f, 1);
+        float x[4] = {f.X(-4, -1.6f), f.X(4, -1.6f), f.X(4, 1.6f), f.X(-4, 1.6f)}, y[4] = {f.Y(-4, -1.6f), f.Y(4, -1.6f), f.Y(4, 1.6f), f.Y(-4, 1.6f)};
+        q.poly(x, y, 4);
+        fill(buf, q, cf[i % 4], 0.8f);
+      }
+      static const C3 bc[4] = {{250, 210, 110}, {236, 110, 160}, {130, 180, 255}, {220, 224, 236}};
+      for (int i = 0; i < 4; i++) {
+        float a = (i * 3 + 1.5f) * H12;
+        burst(buf, px(a, 150), py(a, 150), 22, 14, bc[i], i * 0.3f);
+      }
+      minuteDots(buf, mul(GOLD, 0.9f));
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        Shape s;
+        star(s, Frame(px(h * H12, 194), py(h * H12, 194), 0, 10));
+        fill(buf, s, {0, 0, 0}, 0.4f, 0, 4, 2, 3);
+        fill(buf, s, {90, 66, 20}, 1, 1);
+        fill(buf, s, {246, 214, 120});
+      }
+      quarterNumerals(buf, {244, 212, 124}, {}, 0);
+      break;
+    }
+    case F_VALENTINE: {
+      int n = scatter(xs, ys, 10, 12, 214);
+      for (int i = 0; i < n; i++) {                        // faint big hearts
+        Shape s;
+        heart(s, Frame(xs[i], ys[i], (i % 3 - 1) * 0.35f, 10 + i % 3 * 3));
+        fill(buf, s, {255, 190, 210}, 0.16f);
+      }
+      minuteDots(buf, {255, 200, 214});
+      static const C3 hc[3] = {{255, 160, 190}, {252, 240, 242}, {255, 110, 150}};
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        Shape s;
+        heart(s, Frame(px(h * H12, 193), py(h * H12, 193), 0, 11));
+        fill(buf, s, {40, 0, 10}, 0.45f, 0, 4, 2, 3);
+        fill(buf, s, {110, 10, 36}, 1, 1);
+        fill(buf, s, hc[h % 3]);
+      }
+      quarterNumerals(buf, {255, 236, 240}, {}, 0);
+      break;
+    }
+    case F_PATRICK: {
+      int n = scatter(xs, ys, 8, 14, 317);
+      for (int i = 0; i < n; i++) {                        // faint big shamrocks
+        Shape l, st;
+        shamrock(l, st, Frame(xs[i], ys[i], (i % 3 - 1) * 0.4f, 16 + i % 3 * 4));
+        fill(buf, l, {150, 230, 140}, 0.13f);
+        fill(buf, st, {150, 230, 140}, 0.13f);
+      }
+      n = scatter(xs, ys, 7, 5, 99);
+      for (int i = 0; i < n; i++) {                        // gold coins
+        Shape c, in;
+        c.disc(xs[i], ys[i], 6);
+        in.disc(xs[i], ys[i], 3.8f);
+        fill(buf, c, {0, 0, 0}, 0.4f, 0, 3, 1, 2);
+        fill(buf, c, {250, 214, 100});
+        fill(buf, in, {200, 150, 50}, 1, 0.6f);
+        fill(buf, in, {250, 214, 100}, 1, -0.6f);
+      }
+      minuteDots(buf, {226, 240, 210});
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        Shape l, st;
+        shamrock(l, st, Frame(px(h * H12, 192), py(h * H12, 192), 0, 13));
+        fill(buf, l, {0, 0, 0}, 0.45f, 0, 4, 2, 3);
+        fill(buf, l, {10, 60, 20}, 1, 1);
+        fill(buf, st, {60, 150, 60});
+        fill(buf, l, {96, 206, 96});
+      }
+      quarterNumerals(buf, {244, 214, 120}, {}, 0);
+      break;
+    }
+    case F_EASTER: {
+      int n = scatter(xs, ys, 6, 12, 412);
+      for (int i = 0; i < n; i++) daisy(buf, xs[i], ys[i], 11);
+      minuteDots(buf, {150, 110, 180});
+      static const C3 ec[4] = {{246, 150, 186}, {250, 216, 100}, {130, 214, 170}, {130, 180, 240}};
+      static const C3 eb[4] = {{255, 255, 255}, {200, 110, 170}, {255, 255, 255}, {250, 230, 140}};
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        egg(buf, Frame(px(h * H12, 192), py(h * H12, 192), h * H12, 16), ec[h % 4], eb[h % 4]);
+      }
+      quarterNumerals(buf, {96, 56, 120}, {}, 0);
+      break;
+    }
+    case F_JULY4: {
+      static const C3 bc[4] = {{236, 50, 60}, {240, 240, 248}, {110, 160, 255}, {236, 50, 60}};
+      for (int i = 0; i < 4; i++) {
+        float a = (i * 3 + 1.5f) * H12;
+        burst(buf, px(a, 148), py(a, 148), 26, 16, bc[i], i * 0.4f);
+      }
+      int n = scatter(xs, ys, 12, 4, 1776);
+      for (int i = 0; i < n; i++) {                        // small sparkles
+        Shape s;
+        star(s, Frame(xs[i], ys[i], i * 0.5f, 3.5f));
+        fill(buf, s, {255, 255, 255}, 0.6f);
+      }
+      minuteDots(buf, {236, 236, 244});
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        Shape s;
+        star(s, Frame(px(h * H12, 194), py(h * H12, 194), h * H12, 11));
+        fill(buf, s, {0, 0, 0}, 0.45f, 0, 4, 2, 3);
+        fill(buf, s, {248, 248, 250});
+      }
+      quarterNumerals(buf, {226, 40, 52}, {248, 248, 250}, 2.2f);
+      break;
+    }
+    case F_HALLOWEEN: {
+      int n = scatter(xs, ys, 5, 18, 1031);
+      for (int i = 0; i < n; i++) {                        // bats against the glow
+        Shape b;
+        bat(b, xs[i], ys[i], 14 + i % 3 * 4);
+        fill(buf, b, {14, 4, 16});
+      }
+      minuteDots(buf, {30, 8, 18}, 211, 1.5f);
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        Shape b;
+        bat(b, px(h * H12, 192), py(h * H12, 192), 13);
+        fill(buf, b, {14, 4, 16});
+      }
+      for (int q = 0; q < 4; q++) pumpkin(buf, px(q * PI2 / 4, 176), py(q * PI2 / 4, 176), 19);
+      break;
+    }
+    case F_THANKS: {
+      static const C3 lc[4] = {{200, 50, 30}, {236, 130, 30}, {232, 182, 56}, {170, 80, 30}};
+      int n = scatter(xs, ys, 9, 12, 1122);
+      for (int i = 0; i < n; i++) {                        // falling leaves, faint
+        Shape lf;
+        lf.ell(xs[i], ys[i], 6, 11, i * 0.9f);
+        fill(buf, lf, lc[i % 4], 0.22f);
+      }
+      minuteDots(buf, {246, 226, 190});
+      for (int h = 0; h < 12; h++) {
+        if (h % 3 == 0) continue;
+        leaf(buf, Frame(px(h * H12, 192), py(h * H12, 192), h * H12, 17), lc[h % 4]);
+      }
+      quarterNumerals(buf, {250, 232, 196}, {}, 0);
+      break;
+    }
+  }
 }
 
 // ---------- the Advent calendar ----------
@@ -697,8 +1208,9 @@ static void advent(uint16_t *buf, const Dial &d) {
   int open = d.month == 12 ? (d.mday > 24 ? 24 : d.mday) : 0;
   int today = (d.month == 12 && d.mday <= 24) ? d.mday : 0;
   char l1[24], l2[24], line[48];
-  if (d.daysToXmas >= 0) {
-    xmasLines(d.daysToXmas, l1, l2, sizeof l1);
+  int toXmas = daysToHoliday(d, H_XMAS);
+  if (toXmas >= 0) {
+    xmasLines(toXmas, l1, l2, sizeof l1);
     snprintf(line, sizeof line, "%s %s", l1, l2);
     Shapes t;
     text(t, line, CX, 104, 14, 2.4f, 2.0f);
@@ -866,6 +1378,9 @@ static void markers(uint16_t *buf, int face, bool moon) {
     }
     case F_ADVENT:    // Advent: drawn by advent()
       break;
+    case F_NEWYEAR: case F_VALENTINE: case F_PATRICK: case F_EASTER: case F_JULY4: case F_HALLOWEEN: case F_THANKS:
+      holidayMarkers(buf, face);
+      break;
     case 3:
     default: {  // Midnight: Roman quarters, silver bars, minute dots
       for (int m = 0; m < 60; m++)
@@ -975,15 +1490,15 @@ static void moonDisc(uint16_t *buf, const Theme &t, float phase, float mx, float
     }
 }
 
-// ---------- digital faces: Red LED, VFD, Nixie, Flip ----------
+// ---------- digital faces: Digital (seven segments), Nixie, Flip ----------
 // Big HH:MM across the middle, the date above, the weather and the moon below. The still parts (panel, unlit
 // segments, tubes, cards) are the base; the lit digits are drawn every tick by drawHands.
 struct Digi { C3 on, glow, ghost, text, dim; };
 // The lit colour of each digital face (settable); everything else on the face is worked out from it, as
 // k * colour + a fixed part, so the settings page can tint a preview without asking the screen.
-static const uint32_t DIGIT_DEFAULT[4] = {0xFF2C1C, 0x00F2C8, 0xFF963C, 0xEEEEE8};   // Red LED, VFD, Nixie, Flip
-static uint32_t digitRGB[4] = {0xFF2C1C, 0x00F2C8, 0xFF963C, 0xEEEEE8};
-static float digitGlow[4] = {1, 1, 1, 1}, digitUnlit[4] = {1, 1, 1, 1};   // 1 = as designed
+static const uint32_t DIGIT_DEFAULT[3] = {0x00F2C8, 0xFF963C, 0xEEEEE8};   // Digital (stereo green-blue), Nixie, Flip
+static uint32_t digitRGB[3] = {0x00F2C8, 0xFF963C, 0xEEEEE8};
+static float digitGlow[3] = {1, 1, 1}, digitUnlit[3] = {1, 1, 1};   // 1 = as designed
 static C3 digitC3(int f) {
   uint32_t v = digitRGB[f - F_LED];
   return {(float)((v >> 16) & 255), (float)((v >> 8) & 255), (float)(v & 255)};
@@ -993,10 +1508,12 @@ static Digi digi(int f) {
   switch (f) {
     case F_NIXIE: return {on, on, {64, 42, 32}, mix(on, {255, 255, 255}, 0.15f), mul(on, 0.66f)};   // ghost: tube wire
     case F_FLIP: return {on, {0, 0, 0}, {0, 0, 0}, mul(on, 0.87f), mul(on, 0.55f)};
-    default: return {on, on, mul(on, 0.17f * digitUnlit[f - F_LED]), mul(on, 0.91f), mul(on, 0.55f)};  // Red LED, VFD
+    default: return {on, on, mul(on, 0.17f * digitUnlit[f - F_LED]), mul(on, 0.91f), mul(on, 0.55f)};  // Digital
   }
 }
 static bool isDigital(int f) { return f >= F_LED && f <= F_FLIP; }
+bool digitHasGlow(int f) { return isDigital(f) && f != F_FLIP; }
+bool digitHasUnlit(int f) { return f == F_LED; }
 uint32_t digitColor(int f) { return isDigital(f) ? digitRGB[f - F_LED] : 0; }
 uint32_t defaultDigitColor(int f) { return isDigital(f) ? DIGIT_DEFAULT[f - F_LED] : 0; }
 void setDigitColor(int f, uint32_t rgb) { if (isDigital(f)) digitRGB[f - F_LED] = rgb & 0xFFFFFF; }
@@ -1057,7 +1574,7 @@ static void glowFill(uint16_t *buf, const Shapes &v, const Digi &c, float soft) 
 
 static void digitalBase(uint16_t *buf, int f) {
   const Digi &c = digi(f);
-  if (f == F_LED || f == F_VFD) {
+  if (f == F_LED) {
     Shape panel;
     panel.box(CX, 214, 228, 136, 18);
     fill(buf, panel, {0, 0, 0}, 0.5f, 2, 8, 0, 4);
@@ -1111,13 +1628,13 @@ static void digitalMinute(uint16_t *buf, int f, int h24, int m) {
   const Digi &c = digi(f);
   glowNow = glowOf(f);
   int h12 = (h24 + 11) % 12 + 1;
-  if (f == F_LED || f == F_VFD) {
+  if (f == F_LED) {
     Shapes on;
     seg7(&on, nullptr, h12 >= 10 ? 1 : -1, DX[0], DY, DW, DH, 17);
     seg7(&on, nullptr, h12 % 10, DX[1], DY, DW, DH, 17);
     seg7(&on, nullptr, m / 10, DX[2], DY, DW, DH, 17);
     seg7(&on, nullptr, m % 10, DX[3], DY, DW, DH, 17);
-    glowFill(buf, on, c, f == F_VFD ? 12 : 10);
+    glowFill(buf, on, c, 12);
   } else if (f == F_NIXIE) {
     char d[4] = {(char)('0' + h12 / 10), (char)('0' + h12 % 10), (char)('0' + m / 10), (char)('0' + m % 10)};
     for (int i = 0; i < 4; i++) {
@@ -1154,7 +1671,7 @@ static void digitalSecond(uint16_t *buf, int f, int h24, int sec, bool showSecon
   const Digi &c = digi(f);
   glowNow = glowOf(f);
   bool colon = !showSeconds || sec % 2 == 0;               // the colon blinks with the seconds
-  if (f == F_LED || f == F_VFD) {
+  if (f == F_LED) {
     Shapes on;
     if (colon) colonDots(on, CX, DY, DH, 8);
     if (showSeconds) {
@@ -1162,7 +1679,7 @@ static void digitalSecond(uint16_t *buf, int f, int h24, int sec, bool showSecon
       seg7(&on, nullptr, sec % 10, SX[1], SY, SW, SH, 7);
     }
     text(on, h24 < 12 ? "AM" : "PM", 70, h24 < 12 ? 300 : 330, 16, 2.8f, 1.8f);
-    glowFill(buf, on, c, f == F_VFD ? 12 : 10);
+    glowFill(buf, on, c, 12);
   } else if (f == F_NIXIE) {
     Shapes dots;
     if (colon) colonDots(dots, CX, DY, DH, 6, 0);
@@ -1230,7 +1747,7 @@ static void digitalInfo(uint16_t *buf, int f, const Dial &d) {
 
 void baseKey(const Dial &d, char *out, int n) {
   int f = d.face < 0 || d.face >= FACE_COUNT ? 0 : d.face;
-  if (f == F_ADVENT) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, d.daysToXmas);   // Advent: changes daily
+  if (f == F_ADVENT) snprintf(out, n, "%d|%d/%d|%d", f, d.month, d.mday, daysToHoliday(d, H_XMAS));   // Advent: changes daily
   else if (isDigital(f))                                                                       // its colours
     snprintf(out, n, "%d|%06lx|%d|%d", f, (unsigned long)digitColor(f), digitGlowPct(f), digitUnlitPct(f));
   else snprintf(out, n, "%d|%d", f, f == 3 ? (int)d.moon : 0);                   // Midnight's VI moves for the moon
@@ -1255,7 +1772,8 @@ void renderExtras(uint16_t *buf, const Dial &d) {
     tempWindow(buf, t, CX - 96, CY, "IN", d.in, d.inHum);
     tempWindow(buf, t, CX + 96, CY, "OUT", d.out, d.outHum);
   }
-  if (f == F_CHRISTMAS && d.daysToXmas >= 0) countdownWindow(buf, t, d.daysToXmas);   // in place of the pressure
+  int hol = holidayOf(f), days = hol ? daysToHoliday(d, hol) : -1;
+  if (days >= 0) countdownWindow(buf, t, hol, days);                // in place of the pressure
   else if (d.pres[0]) pressureWindow(buf, t, d);
   if (d.moon) moonWindow(buf, t, d.moonPhase);
 }
@@ -1264,7 +1782,8 @@ void renderExtras(uint16_t *buf, const Dial &d) {
 static void handShapes(int face, int which, float a, Shape &out) {   // which: 0 hour, 1 minute, 2 second
   HandBuilder h(a);
   switch (face) {
-    case 0:  // Gatsby: lances with a diamond
+    case 0:  // Gatsby (and New Year): lances with a diamond
+    case F_NEWYEAR:
       if (which == 0) { h.poly({-24, -6, 84, -4.5f, 84, 4.5f, -24, 6}); h.poly({78, 0, 106, -13, 138, 0, 106, 13}); h.disc(-24, 7); }
       else if (which == 1) { h.poly({-30, -5, 168, -3, 168, 3, -30, 5}); h.poly({160, 0, 180, -7.5f, 208, 0, 180, 7.5f}); h.disc(-30, 6); }
       else { h.line(-44, 202, 1.3f); h.disc(-32, 6); }
@@ -1274,17 +1793,29 @@ static void handShapes(int face, int which, float a, Shape &out) {   // which: 0
       else if (which == 1) { h.rect(-24, 102, 12); h.rect(100, 152, 8); h.rect(150, 184, 4); h.poly({182, -2, 206, 0, 182, 2}); }
       else { h.line(-40, 206, 1.2f); h.disc(-30, 5); }
       break;
-    case 2:  // Ivory: spade hour, lance minute, jade lollipop seconds
+    case 2:  // Ivory (and Easter): spade hour, lance minute, lollipop seconds
+    case F_EASTER:
       if (which == 0) { h.poly({-20, -4.5f, 70, -3, 70, 3, -20, 4.5f}); h.poly({62, 0, 78, -11, 104, -8, 124, 0, 104, 8, 78, 11}); h.disc(-20, 6); }
       else if (which == 1) { h.poly({-26, -4, 172, -2.5f, 172, 2.5f, -26, 4}); h.poly({166, 0, 182, -5.5f, 204, 0, 182, 5.5f}); h.disc(-26, 5); }
       else { h.line(-40, 196, 1.2f); h.disc(150, 4.5f); h.disc(-30, 6); }
       break;
-    case F_GRANDFATHER:  // Grandfather: spade hour, a slim minute with a bead, fine seconds
+    case F_GRANDFATHER:  // Grandfather (and Thanksgiving): spade hour, a slim minute with a bead, fine seconds
+    case F_THANKS:
       if (which == 0) {
         h.rect(-22, 64, 6); h.disc(36, 7); h.disc(-22, 7);
         h.poly({58, 0, 76, -14, 98, 0, 76, 14}); h.disc(72, 8); h.poly({94, -4, 120, 0, 94, 4});
       } else if (which == 1) { h.rect(-28, 170, 4); h.disc(118, 5.5f); h.disc(-28, 6); h.poly({160, 0, 174, -6, 204, 0, 174, 6}); }
       else { h.line(-40, 190, 1.0f); h.disc(-30, 5); }
+      break;
+    case F_VALENTINE:  // Valentine's: slim, with a heart at the tip
+      if (which == 0) { h.rect(-18, 92, 6); h.disc(-18, 6); heart(h.sh, Frame(h.X(106, 0), h.Y(106, 0), a, 15)); }
+      else if (which == 1) { h.rect(-24, 168, 4.5f); h.disc(-24, 5); heart(h.sh, Frame(h.X(180, 0), h.Y(180, 0), a, 11)); }
+      else { h.line(-38, 200, 1.2f); h.disc(-28, 5); }
+      break;
+    case F_HALLOWEEN:  // Halloween: bony, with a pointed tip
+      if (which == 0) { h.poly({-20, -7, 96, -5, 96, 5, -20, 7}); h.poly({90, -11, 132, 0, 90, 11}); h.disc(-20, 7); }
+      else if (which == 1) { h.poly({-26, -5, 168, -3.5f, 168, 3.5f, -26, 5}); h.poly({162, -8, 204, 0, 162, 8}); h.disc(-26, 6); }
+      else { h.line(-38, 200, 1.3f); h.disc(-28, 5); }
       break;
     case F_CHRISTMAS:  // Christmas: candy canes (stripes added in drawHands)
       if (which == 0) h.line(-16, 104, 6.5f);
@@ -1385,9 +1916,11 @@ void init() { glyph('0'); }
 bool faceHasSeconds(int f) { return f != F_ADVENT; }
 
 const char *faceName(int f) {
-  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline",   "Ivory", "Midnight", "Grandfather", "Christmas",
-                                      "Advent", "Red LED", "VFD",   "Nixie",    "Flip"};
+  static const char *n[FACE_COUNT] = {"Gatsby", "Skyline", "Ivory", "Midnight", "Grandfather",
+                                      "New Year", "Valentine's", "St. Patrick's", "Easter", "July 4th", "Halloween",
+                                      "Thanksgiving", "Christmas", "Advent", "Digital", "Nixie", "Flip"};
   return f >= 0 && f < FACE_COUNT ? n[f] : n[0];
 }
+const char *faceGroup(int f) { return f < F_NEWYEAR ? "Classic" : f < F_LED ? "Holidays" : "Digital"; }
 
 }  // namespace clk
