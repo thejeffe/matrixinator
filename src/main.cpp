@@ -1064,7 +1064,8 @@ static void drawChime(uint32_t now, uint32_t rgb, bool fresh) {
 }
 static int clockTest = 0;                    // asked from the settings page: 1 flip, 2..5 chime at :15 :30 :45 :00
 
-static void clockTick() {
+// draw = false: only get the dial ready (drawn by its task in the background), nothing on the screen yet
+static void clockTick(bool draw = true) {
   if (!dialBuf || !clkBuf) return;
   time_t now = time(nullptr);
   tm t;
@@ -1111,7 +1112,7 @@ static void clockTick() {
       xTaskNotifyGive(dialTaskH);
     }
   }
-  if (dialFace < 0) return;                            // the first dial isn't ready yet
+  if (dialFace < 0 || !draw) return;                   // the first dial isn't ready yet (or only getting it ready)
   const int face = dialFace;                                     // hands to match the dial on show
   // chimes on the hour and the quarters (in the clock's day hours, or while a tap shows it)
   static int chimedAt = -1;
@@ -2575,8 +2576,11 @@ void loop() {
   {
     bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
     bool picture = live() && on && S.mode != 2;
-    if (!settingUp && !picture && !bootRain() && clockWanted()) {
-      if (!clockShown) startClock();
+    if (!settingUp && !picture && clockWanted()) {
+      // The first dial takes a couple of seconds to draw: it's drawn in the background while the power-on rain
+      // plays, and the rain stays until it's ready, so the clock appears straight after (no blank screen between).
+      if (bootRain() || (!clockShown && dialFace < 0 && dialTaskH)) clockTick(false);
+      else if (!clockShown) startClock();
       else clockTick();
     } else if (clockShown) {
       clockShown = false;
