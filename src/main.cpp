@@ -1279,9 +1279,27 @@ static int ctlN = 0;
 static String ctlState[CTL_MAX];               // Home Assistant's state ("on", "off", "locked", ...); "" = not read yet
 static int ctlLevel[CTL_MAX];                  // brightness or fan speed, 0-100 (-1 = not known)
 static bool ctlDim[CTL_MAX];                   // it has levels: a dimmable light or a fan with speeds
-static volatile int ctlCmdLevel = -1;          // with ctlCmd: set this level (0-100) instead of toggling
-static volatile int ctlCmd = -1;               // a button to act on (haTask does it)
-static volatile bool ctlCmdUnlock = false;
+// Presses wait here for haTask (under haLock). A pressed button shows what it should become straight away and takes
+// no more presses until Home Assistant reports that state (or 8 s pass): immediate feedback, no double toggles.
+struct CtlCmd { int8_t i; bool unlock; int8_t level; };
+static CtlCmd ctlQ[8];
+static int ctlQn = 0;
+static uint32_t ctlPendAt[CTL_MAX];            // when the press was made (0 = not waiting)
+static uint32_t ctlPendSent[CTL_MAX];          // when Home Assistant took the command (0 = not yet)
+static String ctlPendState[CTL_MAX];           // the state it should become ("" = any: scenes, scripts)
+static int ctlPendLevel[CTL_MAX];              // and the level, for a level change (-1 = no level)
+static const uint32_t CTL_PEND_MS = 8000;
+static void ctlPush(int i, bool unlock, int level, const String &expect) {
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  for (int k = 0; k < ctlQn; k++) if (ctlQ[k].i == i) { for (int m = k; m < ctlQn - 1; m++) ctlQ[m] = ctlQ[m + 1]; ctlQn--; break; }   // a newer level replaces a waiting one
+  if (ctlQn < 8) ctlQ[ctlQn++] = {(int8_t)i, unlock, (int8_t)level};
+  ctlPendAt[i] = millis(); if (!ctlPendAt[i]) ctlPendAt[i] = 1;
+  ctlPendSent[i] = 0;
+  ctlPendState[i] = expect;
+  ctlPendLevel[i] = level;
+  xSemaphoreGive(haLock);
+}
+static bool ctlPending(int i) { return ctlPendAt[i] && millis() - ctlPendAt[i] < CTL_PEND_MS; }
 static uint32_t ctlPolledAt = 0;
 static String ctlErr;
 
@@ -1306,6 +1324,7 @@ static void ctlParse() {
     ctlItems[ctlN].group = group.substring(0, 24);
     ctlState[ctlN] = "";
     ctlLevel[ctlN] = -1;
+    ctlPendAt[ctlN] = 0;
     ctlDim[ctlN] = false;
     ctlN++;
   }
@@ -1334,16 +1353,21 @@ static bool haPost(const String &base, const String &token, const String &path, 
 // one round of the controls' work: do a waiting button press, then read the states (every 2 s while open)
 static void ctlHaWork() {
   if (!ctlN || !S.haToken.length() || WiFi.status() != WL_CONNECTED) return;
+  String err;
   xSemaphoreTake(haLock, portMAX_DELAY);
   String base = S.haUrl, token = S.haToken;
-  int cmd = ctlCmd;
-  bool unlock = ctlCmdUnlock;
-  int level = ctlCmdLevel;
-  ctlCmd = -1;
-  ctlCmdLevel = -1;
-  String ent = cmd >= 0 && cmd < ctlN ? ctlItems[cmd].entity : String(""), cur = cmd >= 0 && cmd < ctlN ? ctlState[cmd] : String("");
   xSemaphoreGive(haLock);
-  String err;
+  bool sent = false;
+  for (;;) {                                             // every press waiting, in order
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  if (!ctlQn) { xSemaphoreGive(haLock); break; }
+  CtlCmd c = ctlQ[0];
+  for (int m = 0; m < ctlQn - 1; m++) ctlQ[m] = ctlQ[m + 1];
+  ctlQn--;
+  int cmd = c.i, level = c.level;
+  bool unlock = c.unlock;
+  String ent = cmd >= 0 && cmd < ctlN ? ctlItems[cmd].entity : String("");
+  xSemaphoreGive(haLock);
   if (ent.length()) {
     String dom = ent.substring(0, ent.indexOf('.')), svc = "toggle", extra;
     if (level >= 0 && dom == "light") { svc = level ? "turn_on" : "turn_off"; if (level) extra = ",\"brightness_pct\":" + String(level); }
@@ -1352,13 +1376,19 @@ static void ctlHaWork() {
     else if (dom == "scene" || dom == "script") svc = "turn_on";
     else if (dom == "button" || dom == "input_button") svc = "press";
     else if (dom == "cover") svc = "toggle";
-    if (!haPost(base, token, "/api/services/" + dom + "/" + svc, "{\"entity_id\":\"" + ent + "\"" + extra + "}", err)) {
-      xSemaphoreTake(haLock, portMAX_DELAY); ctlErr = err; xSemaphoreGive(haLock);
-    }
-    ctlPolledAt = 0;                                     // read the new state straight away
-    vTaskDelay(pdMS_TO_TICKS(250));
+    bool ok = haPost(base, token, "/api/services/" + dom + "/" + svc, "{\"entity_id\":\"" + ent + "\"" + extra + "}", err);
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    if (!ok) { ctlErr = err; ctlPendAt[cmd] = 0; }       // it didn't go: show the real state again
+    else ctlPendSent[cmd] = millis();
+    xSemaphoreGive(haLock);
+    ctlPolledAt = 0;                                     // read the new state soon
+    sent = true;
   }
-  if (!ctlOpen || (ctlPolledAt && millis() - ctlPolledAt < 2000)) return;
+  }
+  if (sent) vTaskDelay(pdMS_TO_TICKS(250));             // give Home Assistant a moment before reading back
+  bool waiting = false;
+  for (int i = 0; i < ctlN; i++) if (ctlPendAt[i]) waiting = true;
+  if (!ctlOpen || (ctlPolledAt && millis() - ctlPolledAt < (waiting ? 700u : 2000u))) return;
   ctlPolledAt = millis();
   String states[CTL_MAX], ents[CTL_MAX];
   int levels[CTL_MAX];
@@ -1391,7 +1421,13 @@ static void ctlHaWork() {
     }
   }
   xSemaphoreTake(haLock, portMAX_DELAY);
-  if (n == ctlN) for (int i = 0; i < n; i++) { ctlState[i] = states[i]; ctlLevel[i] = levels[i]; ctlDim[i] = dims[i]; }
+  if (n == ctlN) for (int i = 0; i < n; i++) {
+    ctlState[i] = states[i]; ctlLevel[i] = levels[i]; ctlDim[i] = dims[i];
+    if (!ctlPendAt[i]) continue;                         // a pressed button: done once Home Assistant agrees (or after 8 s)
+    bool agree = ctlPendSent[i] && (!ctlPendState[i].length() || states[i] == ctlPendState[i]) &&
+                 (ctlPendLevel[i] <= 0 || !ents[i].startsWith("light.") || abs(levels[i] - ctlPendLevel[i]) <= 2);
+    if (agree || millis() - ctlPendAt[i] >= CTL_PEND_MS) ctlPendAt[i] = 0;
+  }
   ctlErr = err;
   xSemaphoreGive(haLock);
 }
@@ -1535,14 +1571,15 @@ static void ctlRect(int i, int &x, int &y, int &w, int &h) {
 static void ctlGet(int i, String &st, String &name, String &group, String &ent, int &lvl, bool &dim) {
   xSemaphoreTake(haLock, portMAX_DELAY);
   st = ctlState[i]; name = ctlItems[i].name; group = ctlItems[i].group; ent = ctlItems[i].entity; lvl = ctlLevel[i]; dim = ctlDim[i];
+  if (ctlPending(i)) { if (ctlPendState[i].length()) st = ctlPendState[i]; if (ctlPendLevel[i] >= 0) lvl = ctlPendLevel[i]; }
   xSemaphoreGive(haLock);
 }
 static void ctlDrawTile(int i, bool force) {
   String st, name, group, ent;
   int lvl; bool dim;
   ctlGet(i, st, name, group, ent, lvl, dim);
-  bool armed = ctlArm == i && millis() - ctlArmAt < 4000;
-  String key = st + "|" + lvl + (armed ? "!" : "");
+  bool armed = ctlArm == i && millis() - ctlArmAt < 4000, pend = ctlPending(i);
+  String key = st + "|" + lvl + (armed ? "!" : "") + (pend ? "~" : "");
   if (!force && key == ctlDrawn[i]) return;
   ctlDrawn[i] = key;
   int x, y, w, h;
@@ -1579,6 +1616,7 @@ static void ctlDrawTile(int i, bool force) {
   if (l2.length()) uiMid(UI_MED, l2, cx, ny + 25, fg, bg);
   String bottom = armed ? String("Tap to unlock") : word;
   uiMid(UI_SMALL, uiFit(UI_SMALL, bottom, inner), cx, y + h - 14, armed ? WHITE : sub, bg);
+  if (pend) for (int k = 0; k < 3; k++) gfx->fillCircle(x + w - 34 + k * 10, y + 14, 3, sub);   // waiting for Home Assistant to agree
   if (dim && !armed) {                                            // a level bar along the bottom edge, and a hint
     int bw = w - 28, bx = x + 14, by = y + h - 8;
     gfx->fillRect(bx, by, bw, 3, isOn ? rgb565(200, 140, 30) : rgb565(60, 70, 84));
@@ -1644,8 +1682,7 @@ static void ctlDrawLevel(bool force) {
 static void ctlSendLevel(int v) {
   ctlLvlVal = constrain(v, 0, 100);
   ctlLvlSentAt = millis();
-  ctlCmdLevel = ctlLvlVal;
-  ctlCmd = ctlLvl;
+  ctlPush(ctlLvl, false, ctlLvlVal, ctlLvlVal ? "on" : "off");
   ctlDrawLevel(false);
 }
 static void ctlOpenLevel(int i) {
@@ -1665,7 +1702,6 @@ static void ctlCloseLevel() {
 }
 
 static void ctlShow() {
-  bootRainUntil = 0;                            // like a tap: the power-on rain is skipped
   ctlOpen = true;
   overlayUntil = 0;
   overlayTop = 0;                               // the picture, the clock and the rain keep out of the way
@@ -1706,19 +1742,21 @@ static void ctlTap(int i) {
   String st, name, group, ent;
   int lvl; bool dim;
   ctlGet(i, st, name, group, ent, lvl, dim);
+  if (ctlPending(i)) return;                                   // still waiting on the last press: no double toggles
   bool unlock = false;
   if (ent.startsWith("lock.") && st == "locked") {             // unlocking: tap, then tap again
     if (ctlArm != i || millis() - ctlArmAt > 4000) { ctlArm = i; ctlArmAt = millis(); ctlDrawTile(i, true); return; }
     unlock = true;
   }
   ctlArm = -1;
-  ctlCmdUnlock = unlock;
-  ctlCmdLevel = -1;
-  ctlCmd = i;
-  int rx, ry, rw, rh;
-  ctlRect(i, rx, ry, rw, rh);
-  gfx->drawRoundRect(rx, ry, rw, rh, 14, WHITE);               // a flash: the press was seen
-  ctlDrawn[i] = "-";                                           // redraw when the new state comes in
+  String dom = ent.substring(0, ent.indexOf('.')), expect;
+  if (dom == "lock") expect = unlock ? "unlocked" : "locked";
+  else if (dom == "cover") expect = st == "open" ? "closed" : st == "closed" ? "open" : "";
+  else if (dom == "scene" || dom == "script" || dom == "button" || dom == "input_button") expect = "";
+  else if (st == "on") expect = "off";
+  else if (st == "off") expect = "on";
+  ctlPush(i, unlock, -1, expect);
+  ctlDrawTile(i, true);                                        // the new state, straight away
 }
 // while the controls are up: touch (tap, hold, slide), redraws, and closing after 30 s untouched
 static void ctlLoop(uint32_t now) {
@@ -2406,7 +2444,7 @@ static void setupWeb() {
         xSemaphoreGive(haLock);
         saveSettings();
       }
-      if (in["open"] == true && ctlReady()) ctlShow();
+      if (in["open"] == true && ctlReady() && !bootRain()) ctlShow();   // not over the power-on rain
       if (in["open"] == false && ctlOpen) ctlClose();
     }
     JsonDocument d;
