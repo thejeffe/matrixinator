@@ -2298,7 +2298,8 @@ static void handleState() {
       else if (in["on"].is<const char *>() && String(in["on"].as<const char *>()) == "t") on = !on;
       if (in["bri"].is<int>()) bri = constrain(in["bri"].as<int>(), 0, 255);
       backlight();
-      if (!on) { if (!clockShown) gfx->fillScreen(BLACK); idleShown = false; forceRedraw = true; }
+      // off: Signinator's picture goes, but not the power-on logo (it plays its time, then the clock) or the clock
+      if (!on) { if (!clockShown && !idleShown) gfx->fillScreen(BLACK); forceRedraw = true; }
       else if (!live() && !idleShown && !clockShown) goDark();
     }
   }
