@@ -28,6 +28,7 @@
 static_assert(sizeof FACE_PREVIEWS / sizeof FACE_PREVIEWS[0] == clk::FACE_COUNT, "run tools/preview/make_previews.py");
 #include "panel_init.h"
 #include "improv.h"
+#include "ui_font.h"
 
 #ifndef FW_VERSION
 #define FW_VERSION ""
@@ -1275,6 +1276,9 @@ struct CtlItem { String name, entity, group; };
 static CtlItem ctlItems[CTL_MAX];
 static int ctlN = 0;
 static String ctlState[CTL_MAX];               // Home Assistant's state ("on", "off", "locked", ...); "" = not read yet
+static int ctlLevel[CTL_MAX];                  // brightness or fan speed, 0-100 (-1 = not known)
+static bool ctlDim[CTL_MAX];                   // it has levels: a dimmable light or a fan with speeds
+static volatile int ctlCmdLevel = -1;          // with ctlCmd: set this level (0-100) instead of toggling
 static volatile int ctlCmd = -1;               // a button to act on (haTask does it)
 static volatile bool ctlCmdUnlock = false;
 static volatile bool ctlOpen = false;
@@ -1301,6 +1305,8 @@ static void ctlParse() {
     ctlItems[ctlN].entity = ent.substring(0, 80);
     ctlItems[ctlN].group = group.substring(0, 24);
     ctlState[ctlN] = "";
+    ctlLevel[ctlN] = -1;
+    ctlDim[ctlN] = false;
     ctlN++;
   }
 }
@@ -1332,17 +1338,21 @@ static void ctlHaWork() {
   String base = S.haUrl, token = S.haToken;
   int cmd = ctlCmd;
   bool unlock = ctlCmdUnlock;
+  int level = ctlCmdLevel;
   ctlCmd = -1;
+  ctlCmdLevel = -1;
   String ent = cmd >= 0 && cmd < ctlN ? ctlItems[cmd].entity : String(""), cur = cmd >= 0 && cmd < ctlN ? ctlState[cmd] : String("");
   xSemaphoreGive(haLock);
   String err;
   if (ent.length()) {
-    String dom = ent.substring(0, ent.indexOf('.')), svc = "toggle";
-    if (dom == "lock") svc = unlock ? "unlock" : "lock";
+    String dom = ent.substring(0, ent.indexOf('.')), svc = "toggle", extra;
+    if (level >= 0 && dom == "light") { svc = level ? "turn_on" : "turn_off"; if (level) extra = ",\"brightness_pct\":" + String(level); }
+    else if (level >= 0 && dom == "fan") { svc = level ? "set_percentage" : "turn_off"; if (level) extra = ",\"percentage\":" + String(level); }
+    else if (dom == "lock") svc = unlock ? "unlock" : "lock";
     else if (dom == "scene" || dom == "script") svc = "turn_on";
     else if (dom == "button" || dom == "input_button") svc = "press";
     else if (dom == "cover") svc = "toggle";
-    if (!haPost(base, token, "/api/services/" + dom + "/" + svc, "{\"entity_id\":\"" + ent + "\"}", err)) {
+    if (!haPost(base, token, "/api/services/" + dom + "/" + svc, "{\"entity_id\":\"" + ent + "\"" + extra + "}", err)) {
       xSemaphoreTake(haLock, portMAX_DELAY); ctlErr = err; xSemaphoreGive(haLock);
     }
     ctlPolledAt = 0;                                     // read the new state straight away
@@ -1351,6 +1361,8 @@ static void ctlHaWork() {
   if (!ctlOpen || (ctlPolledAt && millis() - ctlPolledAt < 2000)) return;
   ctlPolledAt = millis();
   String states[CTL_MAX], ents[CTL_MAX];
+  int levels[CTL_MAX];
+  bool dims[CTL_MAX];
   xSemaphoreTake(haLock, portMAX_DELAY);
   int n = ctlN;
   for (int i = 0; i < n; i++) ents[i] = ctlItems[i].entity;
@@ -1358,13 +1370,28 @@ static void ctlHaWork() {
   err = "";
   for (int i = 0; i < n; i++) {
     String body, e2;
+    levels[i] = -1; dims[i] = false;
     if (!haGet(base, token, "/api/states/" + ents[i], body, e2)) { states[i] = "?"; err = e2; continue; }
     JsonDocument f, doc;
     f["state"] = true;
-    if (deserializeJson(doc, body, DeserializationOption::Filter(f)) == DeserializationError::Ok) states[i] = doc["state"] | "?";
+    f["attributes"]["brightness"] = true;
+    f["attributes"]["supported_color_modes"] = true;
+    f["attributes"]["percentage"] = true;
+    f["attributes"]["percentage_step"] = true;
+    if (deserializeJson(doc, body, DeserializationOption::Filter(f)) != DeserializationError::Ok) { states[i] = "?"; continue; }
+    states[i] = doc["state"] | "?";
+    JsonObject at = doc["attributes"];
+    if (ents[i].startsWith("light.")) {
+      for (JsonVariant m : at["supported_color_modes"].as<JsonArray>()) { const char *cm = m | ""; if (strcmp(cm, "onoff") != 0) dims[i] = true; }
+      if (!at["brightness"].isNull()) levels[i] = (int)lroundf(at["brightness"].as<float>() * 100 / 255.0f);
+      else if (states[i] == "off") levels[i] = 0;
+    } else if (ents[i].startsWith("fan.")) {
+      dims[i] = !at["percentage_step"].isNull() || !at["percentage"].isNull();
+      if (!at["percentage"].isNull()) levels[i] = at["percentage"].as<int>();
+    }
   }
   xSemaphoreTake(haLock, portMAX_DELAY);
-  if (n == ctlN) for (int i = 0; i < n; i++) ctlState[i] = states[i];
+  if (n == ctlN) for (int i = 0; i < n; i++) { ctlState[i] = states[i]; ctlLevel[i] = levels[i]; ctlDim[i] = dims[i]; }
   ctlErr = err;
   xSemaphoreGive(haLock);
 }
@@ -1453,11 +1480,50 @@ static int touched() {
 }
 
 // ---------- the controls screen ----------
-static const int CTL_HEAD = 58, CTL_GAP = 8;
+// Smooth lettering (ui_font.h: anti-aliased, blended onto the known background). A tap toggles a button; holding a
+// dimmable light or a fan opens its level screen (a slider and Off / 25 / 50 / 75 / 100).
+static uint16_t blend565(uint16_t bg, uint16_t fg, int a) {     // a: 0..15
+  int r = ((bg >> 11) * (15 - a) + (fg >> 11) * a) / 15, g = (((bg >> 5) & 63) * (15 - a) + ((fg >> 5) & 63) * a) / 15,
+      b = ((bg & 31) * (15 - a) + (fg & 31) * a) / 15;
+  return (r << 11) | (g << 5) | b;
+}
+static int uiWidth(const UiFont &f, const String &s) {
+  int w = 0;
+  for (char c : s) if (c >= 32 && c < 127) w += f.g[c - 32].adv;
+  return w;
+}
+static uint16_t uiBuf[64 * 64];
+// x: left edge; base: the baseline. Draws each glyph's box (background colour where there's no ink).
+static void uiText(const UiFont &f, const String &s, int x, int base, uint16_t fg, uint16_t bg) {
+  for (char c : s) {
+    if (c < 32 || c >= 127) continue;
+    const UiGlyph &g = f.g[c - 32];
+    if (g.w && g.h && g.w * g.h <= (int)(sizeof(uiBuf) / 2)) {
+      for (int i = 0; i < g.w * g.h; i++) {
+        uint8_t v = f.bits[g.off + i / 2];
+        int a = i & 1 ? v & 15 : v >> 4;
+        uiBuf[i] = a ? blend565(bg, fg, a) : bg;
+      }
+      gfx->draw16bitRGBBitmap(x + g.dx, base + g.dy, uiBuf, g.w, g.h);
+    }
+    x += g.adv;
+  }
+}
+static void uiMid(const UiFont &f, const String &s, int cx, int base, uint16_t fg, uint16_t bg) { uiText(f, s, cx - uiWidth(f, s) / 2, base, fg, bg); }
+static String uiFit(const UiFont &f, String s, int w) {         // shorten with "..." to fit
+  if (uiWidth(f, s) <= w) return s;
+  while (s.length() > 1 && uiWidth(f, s + "...") > w) s.remove(s.length() - 1);
+  return s + "...";
+}
+
+static const int CTL_HEAD = 60, CTL_GAP = 8;
 static uint32_t ctlTouchAt = 0, ctlArmAt = 0;
 static bool ctlWasDown = false;              // the finger that opened the screen is still down: not a press yet
-static int ctlArm = -1;                       // a lock armed for unlocking (second tap within 4 s)
-static String ctlDrawn[CTL_MAX], ctlHeadDrawn;
+static int ctlArm = -1;                      // a lock armed for unlocking (second tap within 4 s)
+static int ctlLvl = -1;                      // the level screen is open for this button (-1: the buttons)
+static int ctlLvlVal = 0;                    // the level shown there (0-100)
+static uint32_t ctlLvlSentAt = 0;            // after sending a level, show ours until Home Assistant catches up
+static String ctlDrawn[CTL_MAX], ctlHeadDrawn, ctlLvlDrawn;
 static int ctlCols() { return ctlN <= 4 ? 2 : 3; }
 static void ctlRect(int i, int &x, int &y, int &w, int &h) {
   int cols = ctlCols(), rows = (ctlN + cols - 1) / cols;
@@ -1466,48 +1532,58 @@ static void ctlRect(int i, int &x, int &y, int &w, int &h) {
   x = CTL_GAP + (i % cols) * (w + CTL_GAP);
   y = CTL_HEAD + CTL_GAP + (i / cols) * (h + CTL_GAP);
 }
-static void textAt(const String &t, int x, int y, int size, uint16_t c) { gfx->setTextSize(size); gfx->setTextColor(c); gfx->setCursor(x, y); gfx->print(t); }
-static void textMid(const String &t, int cx, int y, int size, uint16_t c) { textAt(t, cx - (int)t.length() * 3 * size, y, size, c); }
-static void ctlDrawTile(int i, bool force) {
+static void ctlGet(int i, String &st, String &name, String &group, String &ent, int &lvl, bool &dim) {
   xSemaphoreTake(haLock, portMAX_DELAY);
-  String st = ctlState[i], name = ctlItems[i].name, group = ctlItems[i].group, ent = ctlItems[i].entity;
+  st = ctlState[i]; name = ctlItems[i].name; group = ctlItems[i].group; ent = ctlItems[i].entity; lvl = ctlLevel[i]; dim = ctlDim[i];
   xSemaphoreGive(haLock);
+}
+static void ctlDrawTile(int i, bool force) {
+  String st, name, group, ent;
+  int lvl; bool dim;
+  ctlGet(i, st, name, group, ent, lvl, dim);
   bool armed = ctlArm == i && millis() - ctlArmAt < 4000;
-  String key = st + (armed ? "!" : "");
+  String key = st + "|" + lvl + (armed ? "!" : "");
   if (!force && key == ctlDrawn[i]) return;
   ctlDrawn[i] = key;
   int x, y, w, h;
   ctlRect(i, x, y, w, h);
   String dom = ent.substring(0, ent.indexOf('.'));
-  bool isOn = st == "on" || st == "open" || st == "playing" || st == "unlocked" || st == "home" || st == "heat" || st == "cool";
+  bool isOn = st == "on" || st == "open" || st == "playing" || st == "home" || st == "heat" || st == "cool";
   bool lock = dom == "lock", act = dom == "scene" || dom == "script" || dom == "button" || dom == "input_button";
-  uint16_t bg, fg = WHITE, sub = LIGHTGREY;
+  uint16_t bg, fg = WHITE, sub = rgb565(170, 180, 192);
   String word;
   if (!st.length()) { bg = rgb565(28, 32, 40); word = "..."; }
-  else if (st == "unavailable" || st == "?") { bg = rgb565(28, 32, 40); fg = DARKGREY; word = st == "?" ? "no answer" : "offline"; }
+  else if (st == "unavailable" || st == "?") { bg = rgb565(28, 32, 40); fg = rgb565(120, 128, 140); word = st == "?" ? "No answer" : "Offline"; }
   else if (lock) {
     bool locked = st == "locked";
     bg = locked ? rgb565(30, 110, 60) : rgb565(170, 40, 40);
     word = locked ? "Locked" : st == "unlocked" ? "Unlocked" : st;
+    sub = rgb565(225, 235, 225);
   } else if (act) { bg = rgb565(60, 50, 110); word = "Tap to run"; }
-  else if (isOn) { bg = rgb565(242, 179, 61); fg = rgb565(20, 16, 6); sub = rgb565(70, 50, 10); word = "On"; }
+  else if (isOn) { bg = rgb565(242, 179, 61); fg = rgb565(20, 16, 6); sub = rgb565(80, 56, 10); word = dim && lvl > 0 ? String("On  " + String(lvl) + "%") : String("On"); }
   else { bg = rgb565(36, 44, 56); word = st == "off" ? "Off" : st; }
   gfx->fillRoundRect(x, y, w, h, 14, bg);
   if (armed) { gfx->drawRoundRect(x, y, w, h, 14, WHITE); gfx->drawRoundRect(x + 1, y + 1, w - 2, h - 2, 13, WHITE); }
-  int cx = x + w / 2, maxc = (w - 12) / 12;
-  if (group.length()) textMid(group.substring(0, (w - 8) / 6), cx, y + 10, 1, sub);
-  // the name: one or two lines at size 2
+  int cx = x + w / 2, inner = w - 16;
+  if (group.length()) uiMid(UI_SMALL, uiFit(UI_SMALL, group, inner), cx, y + 22, sub, bg);
+  // the name: one line, or two at the last space that fits
   String l1 = name, l2;
-  if ((int)name.length() > maxc) {
-    int cut = name.lastIndexOf(' ', maxc);
-    if (cut < 1) cut = maxc;
-    l1 = name.substring(0, cut); l2 = name.substring(cut); l2.trim(); l2 = l2.substring(0, maxc);
+  if (uiWidth(UI_MED, name) > inner) {
+    int cut = name.length();
+    while (cut > 0 && (name[cut - 1] != ' ' || uiWidth(UI_MED, name.substring(0, cut - 1)) > inner)) cut--;
+    if (cut > 1) { l1 = name.substring(0, cut - 1); l2 = name.substring(cut); }
+    l1 = uiFit(UI_MED, l1, inner); l2 = uiFit(UI_MED, l2, inner);
   }
-  int ny = y + h / 2 - (l2.length() ? 22 : 12);
-  textMid(l1, cx, ny, 2, fg);
-  if (l2.length()) textMid(l2, cx, ny + 20, 2, fg);
-  String w2 = armed ? String("Tap to unlock") : word;
-  textMid(w2.substring(0, (w - 8) / 6 * (armed ? 1 : 1)), cx, y + h - 22, (int)w2.length() * 12 <= w - 8 ? 2 : 1, armed ? WHITE : sub);
+  int ny = y + h / 2 + (l2.length() ? -4 : 8);
+  uiMid(UI_MED, l1, cx, ny, fg, bg);
+  if (l2.length()) uiMid(UI_MED, l2, cx, ny + 25, fg, bg);
+  String bottom = armed ? String("Tap to unlock") : word;
+  uiMid(UI_SMALL, uiFit(UI_SMALL, bottom, inner), cx, y + h - 14, armed ? WHITE : sub, bg);
+  if (dim && !armed) {                                            // a level bar along the bottom edge, and a hint
+    int bw = w - 28, bx = x + 14, by = y + h - 8;
+    gfx->fillRect(bx, by, bw, 3, isOn ? rgb565(200, 140, 30) : rgb565(60, 70, 84));
+    if (lvl > 0 && isOn) gfx->fillRect(bx, by, bw * min(lvl, 100) / 100, 3, fg);
+  }
 }
 static void ctlDrawHead(bool force) {
   struct tm t;
@@ -1515,28 +1591,89 @@ static void ctlDrawHead(bool force) {
   xSemaphoreTake(haLock, portMAX_DELAY);
   String err = ctlErr;
   xSemaphoreGive(haLock);
-  String key = clock + "|" + err + "|" + npTitle;
+  String key = clock + "|" + err + "|" + npTitle + "|" + ctlLvl;
   if (!force && key == ctlHeadDrawn) return;
   ctlHeadDrawn = key;
-  gfx->fillRect(0, 0, TFT_W, CTL_HEAD, rgb565(10, 12, 18));
+  uint16_t hb = rgb565(10, 12, 18);
+  gfx->fillRect(0, 0, TFT_W, CTL_HEAD, hb);
   gfx->drawFastHLine(0, CTL_HEAD - 1, TFT_W, rgb565(40, 48, 60));
-  textAt(clock, 14, 14, 3, WHITE);
-  String mid = err.length() ? err.substring(0, 34) : npTitle.length() ? (npTitle + (npArtist.length() ? " - " + npArtist : "")).substring(0, 34)
-                                                                       : WiFi.localIP().toString();
-  textAt(mid, 120, 24, 1, err.length() ? rgb565(255, 120, 100) : LIGHTGREY);
-  gfx->fillRoundRect(TFT_W - 104, 10, 94, 38, 10, rgb565(36, 44, 56));
-  textMid("Done", TFT_W - 57, 21, 2, WHITE);
+  uiText(UI_BIG, clock, 14, 44, WHITE, hb);
+  String mid = err.length() ? err : npTitle.length() ? String(npTitle + (npArtist.length() ? String(" - " + npArtist) : String(""))) : String("Hold a light or fan to set its level");
+  int mx = 26 + uiWidth(UI_BIG, clock);
+  uiText(UI_SMALL, uiFit(UI_SMALL, mid, TFT_W - 120 - mx), mx, 37, err.length() ? rgb565(255, 120, 100) : rgb565(150, 160, 172), hb);
+  uint16_t db = rgb565(36, 44, 56);
+  gfx->fillRoundRect(TFT_W - 104, 11, 94, 38, 10, db);
+  uiMid(UI_MED, ctlLvl >= 0 ? "Back" : "Done", TFT_W - 57, 38, WHITE, db);
 }
+
+// ---- the level screen (brightness or fan speed) ----
+static const int LV_X = 40, LV_W = TFT_W - 80, LV_Y = 250, LV_H = 56, LV_BY = 360, LV_BH = 76;
+static const int LV_STEPS[5] = {0, 25, 50, 75, 100};
+static void ctlDrawLevel(bool force) {
+  String st, name, group, ent;
+  int lvl; bool dim;
+  ctlGet(ctlLvl, st, name, group, ent, lvl, dim);
+  if (millis() - ctlLvlSentAt > 4000 && lvl >= 0) ctlLvlVal = st == "off" ? 0 : lvl;
+  String key = String(ctlLvlVal) + "|" + st;
+  if (!force && key == ctlLvlDrawn) return;
+  ctlLvlDrawn = key;
+  bool fan = ent.startsWith("fan.");
+  uint16_t bg = BLACK, amber = rgb565(242, 179, 61);
+  if (force) {
+    gfx->fillRect(0, CTL_HEAD, TFT_W, TFT_H - CTL_HEAD, bg);
+    uiMid(UI_MED, uiFit(UI_MED, (group.length() ? String(group + "  -  ") : String("")) + name, TFT_W - 40), TFT_W / 2, CTL_HEAD + 52, WHITE, bg);
+    uiMid(UI_SMALL, fan ? "Fan speed" : "Brightness", TFT_W / 2, CTL_HEAD + 80, rgb565(150, 160, 172), bg);
+  }
+  gfx->fillRect(0, 150, TFT_W, 70, bg);
+  uiMid(UI_BIG, ctlLvlVal ? String(String(ctlLvlVal) + "%") : String("Off"), TFT_W / 2, 205, ctlLvlVal ? amber : rgb565(150, 160, 172), bg);
+  // the slider
+  gfx->fillRoundRect(LV_X, LV_Y, LV_W, LV_H, 14, rgb565(36, 44, 56));
+  int fw = LV_W * ctlLvlVal / 100;
+  if (fw > 0) gfx->fillRoundRect(LV_X, LV_Y, max(fw, 28), LV_H, 14, amber);
+  gfx->fillRoundRect(LV_X + max(0, min(fw, LV_W) - 10), LV_Y - 6, 20, LV_H + 12, 8, WHITE);
+  // the quick buttons
+  int bw = (LV_W - 4 * 10) / 5;
+  for (int k = 0; k < 5; k++) {
+    int bx = LV_X + k * (bw + 10);
+    bool sel = ctlLvlVal == LV_STEPS[k];
+    uint16_t b = sel ? amber : rgb565(36, 44, 56);
+    gfx->fillRoundRect(bx, LV_BY, bw, LV_BH, 12, b);
+    uiMid(UI_MED, k ? String(LV_STEPS[k]) : String("Off"), bx + bw / 2, LV_BY + LV_BH / 2 + 8, sel ? rgb565(20, 16, 6) : WHITE, b);
+  }
+}
+static void ctlSendLevel(int v) {
+  ctlLvlVal = constrain(v, 0, 100);
+  ctlLvlSentAt = millis();
+  ctlCmdLevel = ctlLvlVal;
+  ctlCmd = ctlLvl;
+  ctlDrawLevel(false);
+}
+static void ctlOpenLevel(int i) {
+  int lvl; bool dim; String st, name, group, ent;
+  ctlGet(i, st, name, group, ent, lvl, dim);
+  ctlLvl = i;
+  ctlLvlVal = st == "off" ? 0 : lvl >= 0 ? lvl : 100;
+  ctlLvlSentAt = 0;
+  ctlDrawHead(true);
+  ctlDrawLevel(true);
+}
+static void ctlCloseLevel() {
+  ctlLvl = -1;
+  gfx->fillRect(0, CTL_HEAD, TFT_W, TFT_H - CTL_HEAD, BLACK);
+  ctlDrawHead(true);
+  for (int i = 0; i < ctlN; i++) ctlDrawTile(i, true);
+}
+
 static void ctlShow() {
   ctlOpen = true;
   overlayUntil = 0;
   overlayTop = 0;                               // the picture, the clock and the rain keep out of the way
   ctlTouchAt = millis();
   ctlArm = -1;
+  ctlLvl = -1;
   ctlPolledAt = 0;
   ctlWasDown = true;
   gfx->fillScreen(BLACK);
-  for (int i = 0; i < ctlN; i++) ctlDrawn[i] = "-";
   ctlDrawHead(true);
   for (int i = 0; i < ctlN; i++) ctlDrawTile(i, true);
   asleep = false;
@@ -1545,6 +1682,7 @@ static void ctlShow() {
 static void ctlClose() {
   ctlOpen = false;
   ctlArm = -1;
+  ctlLvl = -1;
   overlayTop = TFT_H;
   gfx->fillScreen(BLACK);
   forceRedraw = true;
@@ -1553,46 +1691,83 @@ static void ctlClose() {
   else if (idleShown) { idleShown = false; panelKey = ""; showIdle(); }
   else if (!live()) goDark();
 }
-// a tap on the controls screen
-static void ctlTap(int x, int y) {
-  ctlTouchAt = millis();
-  if (y < CTL_HEAD) { if (x > TFT_W - 150) ctlClose(); return; }
+static int ctlTileAt(int x, int y) {
   for (int i = 0; i < ctlN; i++) {
     int rx, ry, rw, rh;
     ctlRect(i, rx, ry, rw, rh);
-    if (x < rx || x >= rx + rw || y < ry || y >= ry + rh) continue;
-    xSemaphoreTake(haLock, portMAX_DELAY);
-    String ent = ctlItems[i].entity, st = ctlState[i];
-    xSemaphoreGive(haLock);
-    bool unlock = false;
-    if (ent.startsWith("lock.") && st == "locked") {            // unlocking: tap, then tap again
-      if (ctlArm != i || millis() - ctlArmAt > 4000) { ctlArm = i; ctlArmAt = millis(); ctlDrawTile(i, true); return; }
-      unlock = true;
-    }
-    ctlArm = -1;
-    ctlCmdUnlock = unlock;
-    ctlCmd = i;
-    gfx->drawRoundRect(rx, ry, rw, rh, 14, WHITE);              // a flash: the press was seen
-    xSemaphoreTake(haLock, portMAX_DELAY);
-    ctlDrawn[i] = "-";                                          // redraw when the new state comes in
-    xSemaphoreGive(haLock);
-    return;
+    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) return i;
   }
+  return -1;
 }
-// while the controls are up: touch, redraws, and closing after 30 s untouched
+// a short tap on a button (acted on when the finger lifts, so a hold can open the level screen instead)
+static void ctlTap(int i) {
+  String st, name, group, ent;
+  int lvl; bool dim;
+  ctlGet(i, st, name, group, ent, lvl, dim);
+  bool unlock = false;
+  if (ent.startsWith("lock.") && st == "locked") {             // unlocking: tap, then tap again
+    if (ctlArm != i || millis() - ctlArmAt > 4000) { ctlArm = i; ctlArmAt = millis(); ctlDrawTile(i, true); return; }
+    unlock = true;
+  }
+  ctlArm = -1;
+  ctlCmdUnlock = unlock;
+  ctlCmdLevel = -1;
+  ctlCmd = i;
+  int rx, ry, rw, rh;
+  ctlRect(i, rx, ry, rw, rh);
+  gfx->drawRoundRect(rx, ry, rw, rh, 14, WHITE);               // a flash: the press was seen
+  ctlDrawn[i] = "-";                                           // redraw when the new state comes in
+}
+// while the controls are up: touch (tap, hold, slide), redraws, and closing after 30 s untouched
 static void ctlLoop(uint32_t now) {
-  static uint32_t touchAt = 0, upAt = 0;
-  if (now - touchAt > 30) {
+  static uint32_t touchAt = 0, upAt = 0, downAt = 0;
+  static int downTile = -1, downX = 0, downY = 0;
+  static bool held = false, sliding = false;
+  if (now - touchAt > 25) {
     touchAt = now;
     int t = touched();
-    if (t == 1 && !ctlWasDown && now - upAt > 150) ctlTap(touchX, touchY);
-    if (t == 0 && ctlWasDown) upAt = now;
+    if (t == 1 && !ctlWasDown && now - upAt > 120) {            // finger down
+      ctlTouchAt = now; downAt = now; downX = touchX; downY = touchY; held = false; sliding = false;
+      downTile = -1;
+      if (downY < CTL_HEAD) { if (downX > TFT_W - 150) { if (ctlLvl >= 0) ctlCloseLevel(); else ctlClose(); } held = true; }
+      else if (ctlLvl >= 0) {
+        if (downY >= LV_Y - 20 && downY < LV_Y + LV_H + 20) { sliding = true; ctlLvlVal = constrain((downX - LV_X) * 100 / LV_W, 0, 100); ctlLvlSentAt = now; ctlDrawLevel(false); }
+        else if (downY >= LV_BY && downY < LV_BY + LV_BH) {
+          int bw = (LV_W - 40) / 5, k = (downX - LV_X) / (bw + 10);
+          if (downX >= LV_X && k >= 0 && k < 5) ctlSendLevel(LV_STEPS[k]);
+          held = true;
+        } else held = true;
+      } else downTile = ctlTileAt(downX, downY);
+    } else if (t == 1 && ctlWasDown && ctlOpen) {               // still down
+      ctlTouchAt = now;
+      if (sliding) {
+        int v = constrain((touchX - LV_X) * 100 / LV_W, 0, 100);
+        v = (v + 2) / 5 * 5;                                     // steps of 5
+        if (v != ctlLvlVal) { ctlLvlVal = v; ctlLvlSentAt = now; ctlDrawLevel(false); }
+      } else if (!held && downTile >= 0 && now - downAt > 550) {   // a hold: the level screen, if it has levels
+        String st, name, group, ent; int lvl; bool dim;
+        ctlGet(downTile, st, name, group, ent, lvl, dim);
+        held = true;
+        if (dim) ctlOpenLevel(downTile);
+      }
+    }
+    if (t == 0 && ctlWasDown) {                                  // finger up
+      upAt = now;
+      if (sliding && ctlLvl >= 0) ctlSendLevel(ctlLvlVal);
+      else if (!held && downTile >= 0 && ctlLvl < 0) ctlTap(downTile);
+      sliding = false; held = true; downTile = -1;
+    }
     if (t >= 0) ctlWasDown = t == 1;
   }
   if (!ctlOpen) return;
   if (ctlArm >= 0 && now - ctlArmAt > 4000) { int a = ctlArm; ctlArm = -1; ctlDrawTile(a, true); }
   static uint32_t drawAt = 0;
-  if (now - drawAt > 200) { drawAt = now; ctlDrawHead(false); for (int i = 0; i < ctlN; i++) ctlDrawTile(i, false); }
+  if (now - drawAt > 200) {
+    drawAt = now;
+    ctlDrawHead(false);
+    if (ctlLvl >= 0) ctlDrawLevel(false);
+    else for (int i = 0; i < ctlN; i++) ctlDrawTile(i, false);
+  }
   if (now - ctlTouchAt > 30000) ctlClose();
 }
 
@@ -2238,7 +2413,7 @@ static void setupWeb() {
     xSemaphoreTake(haLock, portMAX_DELAY);
     d["error"] = ctlErr;
     JsonArray a = d["buttons"].to<JsonArray>();
-    for (int i = 0; i < ctlN; i++) { JsonObject o = a.add<JsonObject>(); o["group"] = ctlItems[i].group; o["name"] = ctlItems[i].name; o["entity"] = ctlItems[i].entity; o["state"] = ctlState[i]; }
+    for (int i = 0; i < ctlN; i++) { JsonObject o = a.add<JsonObject>(); o["group"] = ctlItems[i].group; o["name"] = ctlItems[i].name; o["entity"] = ctlItems[i].entity; o["state"] = ctlState[i]; o["level"] = ctlLevel[i]; o["dimmable"] = ctlDim[i]; }
     xSemaphoreGive(haLock);
     sendJson(d);
   });
