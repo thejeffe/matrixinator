@@ -197,6 +197,8 @@ static bool clockForce = false;    // redraw the clock now (something drew over 
 static uint32_t idleSince = 0, peekUntil = 0;
 static const uint32_t IDLE_SLEEP_MS = 15000;
 static uint32_t bootRainUntil = 0;   // power-on: the rain plays until then (0 = done)
+static int dialFace = -1;                    // the clock dial in dialBuf is this face (-1: none drawn yet)
+static bool timeOk();
 static bool bootRain() { if (bootRainUntil && (int32_t)(millis() - bootRainUntil) >= 0) bootRainUntil = 0; return bootRainUntil; }
 static String npTitle, npArtist;        // the song (from Signinator), shown on a tap
 static void goDark();
@@ -305,7 +307,8 @@ static void backlight() {
   if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
   // the clock keeps its own light: Signinator's on/off is about its pictures
-  digitalWrite(TFT_BCKL, ((clockShown || ctlOpen || (on && blDuty > 0)) && !asleep) ? HIGH : LOW);   // the controls light up even when Signinator has the screen off
+  // the clock, the controls and the logo (power-on, setting up) light up even when Signinator has the screen off
+  digitalWrite(TFT_BCKL, ((clockShown || ctlOpen || idleShown || (on && blDuty > 0)) && !asleep) ? HIGH : LOW);
   if (blDuty != dimFor) {
     for (int i = 0; i < 256; i++) dimLut[i] = (uint8_t)((i * blDuty + 127) / 255);
     dimFor = blDuty;
@@ -712,6 +715,10 @@ static void showIdle() {
     l2 = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("No Wi-Fi yet");
     l3 = npTitle.length() ? (npTitle + (npArtist.length() ? " - " + npArtist : "")).substring(0, 60)
                           : String("Matrixinator v") + VERSION;
+  } else if (S.mode != 0) {                                // on the way to the clock: what it's waiting for
+    l3 = WiFi.status() != WL_CONNECTED ? String("Connecting to Wi-Fi...") : !timeOk() ? String("Getting the time...")
+         : dialFace < 0 ? String("Getting the clock ready...") : String("");
+    c2 = rgb565(120, 200, 140);
   }
   String key = l2 + "|" + l3;
   if (key == panelKey) return;
@@ -764,7 +771,6 @@ static clk::Dial dialReq;
 static String dialReqKey;
 static int dialReqH = 0, dialReqM = 0;      // the minute drawn in (faces with digits)
 static volatile bool dialBusy = false, dialReady = false;
-static int dialFace = -1;                    // the face dialBuf holds (-1: none yet)
 static TaskHandle_t dialTaskH = nullptr;
 static volatile uint32_t dialRenderMs = 0;
 static void dialTask(void *) {
@@ -2589,14 +2595,21 @@ void loop() {
   }
 
   if (on && !live() && lastFrameAt && !idleShown && !asleep && !bootRain() && !overlayUntil && !clockShown) goDark();   // stream stopped: dark
-  if (idleShown && on && !overlayUntil && !asleep) {          // the rain keeps falling; panel follows Wi-Fi
+  if (idleShown && !overlayUntil && !asleep) {               // the rain keeps falling; panel follows Wi-Fi
     mrStep();
     static uint32_t panelAt = 0;
     if (now - panelAt > 1000) { panelAt = now; showIdle(); }
-    // nothing to show for a while (and not setting up): go to sleep until pixels, a photo or a tap
     bool settingUp = apOn && WiFi.status() != WL_CONNECTED;
     if (!idleSince) idleSince = now;
-    if (!settingUp && !bootRain() && now - idleSince > IDLE_SLEEP_MS) goDark();   // after power-on: dark until there's something
+    if (on) {
+      // nothing to show for a while (and not setting up): go to sleep until pixels, a photo or a tap
+      if (!settingUp && !bootRain() && now - idleSince > IDLE_SLEEP_MS) goDark();   // after power-on: dark until there's something
+    } else if (!settingUp && !bootRain()) {
+      // Signinator has the screen off: the logo stays (lit, falling) only while the clock is on its way (Wi-Fi, the
+      // time, the first dial), and never more than a minute past the rain
+      bool clockComing = S.mode != 0 && (!timeOk() || clockWanted());
+      if (!clockComing || now > (uint32_t)S.bootSecs * 1000UL + 60000UL) goDark();
+    }
   }
 
   static uint32_t touchAt = 0;
