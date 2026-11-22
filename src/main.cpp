@@ -191,6 +191,7 @@ static int16_t *spanS, *spanL;       // per line of a cell: where the dot starts
 static bool forceRedraw = true;
 static bool idleShown = false;     // the idle screen (Matrix rain) is showing
 static bool asleep = false;        // nothing to show: backlight off until pixels/photos arrive or a tap
+static volatile bool ctlOpen = false;   // the tap controls (Home Assistant buttons) have the screen
 static bool clockShown = false;    // the clock is on the screen
 static bool clockForce = false;    // redraw the clock now (something drew over it)
 static uint32_t idleSince = 0, peekUntil = 0;
@@ -304,7 +305,7 @@ static void backlight() {
   if (on) v = S.follow ? S.blMin + (int)((S.blMax - S.blMin) * sqrtf(bri / 255.0f)) : S.blMax;
   blDuty = constrain(v, 0, 255);
   // the clock keeps its own light: Signinator's on/off is about its pictures
-  digitalWrite(TFT_BCKL, ((clockShown || (on && blDuty > 0)) && !asleep) ? HIGH : LOW);
+  digitalWrite(TFT_BCKL, ((clockShown || ctlOpen || (on && blDuty > 0)) && !asleep) ? HIGH : LOW);   // the controls light up even when Signinator has the screen off
   if (blDuty != dimFor) {
     for (int i = 0; i < 256; i++) dimLut[i] = (uint8_t)((i * blDuty + 127) / 255);
     dimFor = blDuty;
@@ -1281,7 +1282,6 @@ static bool ctlDim[CTL_MAX];                   // it has levels: a dimmable ligh
 static volatile int ctlCmdLevel = -1;          // with ctlCmd: set this level (0-100) instead of toggling
 static volatile int ctlCmd = -1;               // a button to act on (haTask does it)
 static volatile bool ctlCmdUnlock = false;
-static volatile bool ctlOpen = false;
 static uint32_t ctlPolledAt = 0;
 static String ctlErr;
 
@@ -1665,6 +1665,7 @@ static void ctlCloseLevel() {
 }
 
 static void ctlShow() {
+  bootRainUntil = 0;                            // like a tap: the power-on rain is skipped
   ctlOpen = true;
   overlayUntil = 0;
   overlayTop = 0;                               // the picture, the clock and the rain keep out of the way
@@ -1684,12 +1685,13 @@ static void ctlClose() {
   ctlArm = -1;
   ctlLvl = -1;
   overlayTop = TFT_H;
+  // back to what should be showing now, with the light to match: the picture, the clock, or dark
   gfx->fillScreen(BLACK);
-  forceRedraw = true;
-  if (clockShown) clockForce = true;
-  else if (live() && !photoShown) render(bufs[drawIdx]);
-  else if (idleShown) { idleShown = false; panelKey = ""; showIdle(); }
-  else if (!live()) goDark();
+  idleShown = false; photoShown = false; clockShown = false; forceRedraw = true;
+  asleep = false;
+  if (live() && on && S.mode != 2) { render(bufs[drawIdx]); backlight(); }
+  else if (clockWanted()) startClock();
+  else goDark();
 }
 static int ctlTileAt(int x, int y) {
   for (int i = 0; i < ctlN; i++) {
