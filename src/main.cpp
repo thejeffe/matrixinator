@@ -53,7 +53,7 @@ struct Settings {
   int night = 0;            // outside the clock's hours: 0 = screen off, 1 = the clock, dimmed
   int nightBri = 40;
   int chimes = 2;           // visual chimes: 0 off, 1 on the hour, 2 on the hour and the quarters
-  int bootSecs = 20;        // power-on: the Matrix rain plays this long before pictures or the clock
+  int bootSecs = 10;        // power-on: the Matrix rain plays this long before pictures or the clock
   String tz = "PST8PDT,M3.2.0,M11.1.0";
   // Home Assistant temperatures
   bool ha = false;
@@ -94,7 +94,7 @@ static void loadSettings() {
   S.clkBri = constrain(prefs.getInt("cbri", 200), 10, 255);
   S.night = constrain(prefs.getInt("night", 0), 0, 1);
   S.nightBri = constrain(prefs.getInt("nbri", 40), 5, 255);
-  S.bootSecs = constrain(prefs.getInt("boot", 20), 0, 120);
+  S.bootSecs = constrain(prefs.getInt("boot", 10), 0, 120);
   S.chimes = constrain(prefs.getInt("chime", 2), 0, 2);
   S.tz = prefs.getString("tz", "PST8PDT,M3.2.0,M11.1.0");
   S.ha = prefs.getBool("ha", false);
@@ -2392,6 +2392,7 @@ static void setupWeb() {
       bool save = false;
       if (in["face"].is<int>()) { S.face = constrain(in["face"].as<int>(), 0, clk::FACE_COUNT - 1); save = true; }
       if (in["mode"].is<int>()) { S.mode = constrain(in["mode"].as<int>(), 0, 2); save = true; }
+      if (in["boot"].is<int>()) { S.bootSecs = constrain(in["boot"].as<int>(), 0, 120); save = true; }   // the power-on logo's seconds
       if (clk::defaultDigitColor(S.face)) {           // the digital face's colour: "#rrggbb", glow %, unlit %
         if (in["color"].is<const char *>()) {
           String c = in["color"].as<const char *>();
