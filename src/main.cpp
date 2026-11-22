@@ -58,6 +58,7 @@ struct Settings {
   bool ha = false;
   String haUrl = "http://homeassistant.local:8123", haToken;
   String haEnt[5];
+  String ctl;               // the tap screen's buttons: "# Room" lines and "Name = entity_id" lines (Home Assistant)
   bool haSea = true;        // the pressure sensor reads station pressure: correct it with HA's elevation          // entity ids: inside temp, outside temp, inside humidity, outside humidity, pressure
 } S;
 static Preferences prefs;
@@ -100,6 +101,7 @@ static void loadSettings() {
   S.haToken = prefs.getString("hatok", "");
   for (int i = 0; i < 5; i++) S.haEnt[i] = prefs.getString(HA_KEYS[i], "");
   S.haSea = prefs.getBool("hasea", true);
+  S.ctl = prefs.getString("ctl", "");
   // Face list v2 (holiday faces; Red LED and VFD became one colourable Digital face): move the saved face
   // and the digital colours from the old numbers to the new ones.
   int oldOf[clk::FACE_COUNT];                     // new face -> where its settings were saved before
@@ -152,6 +154,7 @@ static void saveSettings() {
   prefs.putString("hatok", S.haToken);
   for (int i = 0; i < 5; i++) prefs.putString(HA_KEYS[i], S.haEnt[i]);
   prefs.putBool("hasea", S.haSea);
+  prefs.putString("ctl", S.ctl);
   for (int f = 0; f < clk::FACE_COUNT; f++) {
     if (!clk::defaultDigitColor(f)) continue;
     prefs.putUInt(("dc" + String(f)).c_str(), clk::digitColor(f));
@@ -1263,9 +1266,113 @@ static int pressureTrend(float hpa) {
   return d >= 1.0f ? 1 : d <= -1.0f ? -1 : 0;
 }
 
+// ---------- controls (tap the screen): Home Assistant buttons ----------
+// S.ctl holds the list: "# Talking room" starts a group, "Lamp = switch.talkingroom_lamp" adds a button. Up to 12.
+// Tapping a button toggles it (a lock locks; unlocking needs a second tap within 4 s). The states are read every
+// 2 s while the screen is open.
+static const int CTL_MAX = 12;
+struct CtlItem { String name, entity, group; };
+static CtlItem ctlItems[CTL_MAX];
+static int ctlN = 0;
+static String ctlState[CTL_MAX];               // Home Assistant's state ("on", "off", "locked", ...); "" = not read yet
+static volatile int ctlCmd = -1;               // a button to act on (haTask does it)
+static volatile bool ctlCmdUnlock = false;
+static volatile bool ctlOpen = false;
+static uint32_t ctlPolledAt = 0;
+static String ctlErr;
+
+static void ctlParse() {
+  ctlN = 0;
+  String group, src = S.ctl + "\n";
+  int start = 0;
+  for (int i = 0; i < (int)src.length() && ctlN < CTL_MAX; i++) {
+    if (src[i] != '\n') continue;
+    String ln = src.substring(start, i);
+    start = i + 1;
+    ln.trim();
+    if (!ln.length()) continue;
+    if (ln[0] == '#') { group = ln.substring(1); group.trim(); continue; }
+    int eq = ln.indexOf('=');
+    String name = eq > 0 ? ln.substring(0, eq) : ln, ent = eq > 0 ? ln.substring(eq + 1) : ln;
+    name.trim(); ent.trim();
+    if (ent.indexOf('.') < 1) continue;
+    if (eq <= 0) { name = ent.substring(ent.indexOf('.') + 1); name.replace("_", " "); }
+    ctlItems[ctlN].name = name.substring(0, 24);
+    ctlItems[ctlN].entity = ent.substring(0, 80);
+    ctlItems[ctlN].group = group.substring(0, 24);
+    ctlState[ctlN] = "";
+    ctlN++;
+  }
+}
+static bool ctlReady() { return ctlN > 0 && S.haToken.length() && WiFi.status() == WL_CONNECTED; }
+
+static bool haPost(const String &base, const String &token, const String &path, const String &json, String &err) {
+  WiFiClient plain;
+  WiFiClientSecure tls;
+  HTTPClient http;
+  String u = base + path;
+  bool begun;
+  if (u.startsWith("https://")) { tls.setInsecure(); begun = http.begin(tls, u); }
+  else begun = http.begin(plain, u);
+  if (!begun) { err = "bad Home Assistant URL"; return false; }
+  http.setConnectTimeout(3000);
+  http.setTimeout(6000);
+  http.addHeader("Authorization", "Bearer " + token);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(json);
+  http.end();
+  if (code != 200) { err = path + ": " + (code < 0 ? String("can't reach Home Assistant") : "HTTP " + String(code)); return false; }
+  return true;
+}
+
+// one round of the controls' work: do a waiting button press, then read the states (every 2 s while open)
+static void ctlHaWork() {
+  if (!ctlN || !S.haToken.length() || WiFi.status() != WL_CONNECTED) return;
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  String base = S.haUrl, token = S.haToken;
+  int cmd = ctlCmd;
+  bool unlock = ctlCmdUnlock;
+  ctlCmd = -1;
+  String ent = cmd >= 0 && cmd < ctlN ? ctlItems[cmd].entity : String(""), cur = cmd >= 0 && cmd < ctlN ? ctlState[cmd] : String("");
+  xSemaphoreGive(haLock);
+  String err;
+  if (ent.length()) {
+    String dom = ent.substring(0, ent.indexOf('.')), svc = "toggle";
+    if (dom == "lock") svc = unlock ? "unlock" : "lock";
+    else if (dom == "scene" || dom == "script") svc = "turn_on";
+    else if (dom == "button" || dom == "input_button") svc = "press";
+    else if (dom == "cover") svc = "toggle";
+    if (!haPost(base, token, "/api/services/" + dom + "/" + svc, "{\"entity_id\":\"" + ent + "\"}", err)) {
+      xSemaphoreTake(haLock, portMAX_DELAY); ctlErr = err; xSemaphoreGive(haLock);
+    }
+    ctlPolledAt = 0;                                     // read the new state straight away
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  if (!ctlOpen || (ctlPolledAt && millis() - ctlPolledAt < 2000)) return;
+  ctlPolledAt = millis();
+  String states[CTL_MAX], ents[CTL_MAX];
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  int n = ctlN;
+  for (int i = 0; i < n; i++) ents[i] = ctlItems[i].entity;
+  xSemaphoreGive(haLock);
+  err = "";
+  for (int i = 0; i < n; i++) {
+    String body, e2;
+    if (!haGet(base, token, "/api/states/" + ents[i], body, e2)) { states[i] = "?"; err = e2; continue; }
+    JsonDocument f, doc;
+    f["state"] = true;
+    if (deserializeJson(doc, body, DeserializationOption::Filter(f)) == DeserializationError::Ok) states[i] = doc["state"] | "?";
+  }
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  if (n == ctlN) for (int i = 0; i < n; i++) ctlState[i] = states[i];
+  ctlErr = err;
+  xSemaphoreGive(haLock);
+}
+
 static void haTask(void *) {
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(ctlOpen ? 100 : 500));
+    if (WiFi.status() == WL_CONNECTED && !updating) ctlHaWork();
     if (!S.ha || WiFi.status() != WL_CONNECTED || updating) continue;
     if (!haKick && millis() - haTriedAt < HA_EVERY_MS) continue;
     haKick = false;
@@ -1321,6 +1428,7 @@ static void touchBegin() {
   }
 }
 // 1 = finger down, 0 = up, -1 = no new reading (keep the last state)
+static int touchX = -1, touchY = -1;   // where the last touch was (screen pixels)
 static int touched() {
   if (!touchAddr) return 0;
   Wire.beginTransmission(touchAddr);
@@ -1329,10 +1437,163 @@ static int touched() {
   if (Wire.requestFrom(touchAddr, (uint8_t)1) != 1) return -1;
   uint8_t st = Wire.read();
   if (!(st & 0x80)) return -1;
+  if ((st & 0x0F) > 0) {                             // the first point: x, y at 0x8150
+    Wire.beginTransmission(touchAddr);
+    Wire.write(0x81); Wire.write(0x50);
+    if (Wire.endTransmission(false) == 0 && Wire.requestFrom(touchAddr, (uint8_t)4) == 4) {
+      int xl = Wire.read(), xh = Wire.read(), yl = Wire.read(), yh = Wire.read();
+      touchX = constrain(xl | (xh << 8), 0, TFT_W - 1);
+      touchY = constrain(yl | (yh << 8), 0, TFT_H - 1);
+    }
+  }
   Wire.beginTransmission(touchAddr);                // clear the status for the next read
   Wire.write(0x81); Wire.write(0x4E); Wire.write(0);
   Wire.endTransmission();
   return (st & 0x0F) > 0 ? 1 : 0;
+}
+
+// ---------- the controls screen ----------
+static const int CTL_HEAD = 58, CTL_GAP = 8;
+static uint32_t ctlTouchAt = 0, ctlArmAt = 0;
+static bool ctlWasDown = false;              // the finger that opened the screen is still down: not a press yet
+static int ctlArm = -1;                       // a lock armed for unlocking (second tap within 4 s)
+static String ctlDrawn[CTL_MAX], ctlHeadDrawn;
+static int ctlCols() { return ctlN <= 4 ? 2 : 3; }
+static void ctlRect(int i, int &x, int &y, int &w, int &h) {
+  int cols = ctlCols(), rows = (ctlN + cols - 1) / cols;
+  w = (TFT_W - CTL_GAP * (cols + 1)) / cols;
+  h = min(150, (TFT_H - CTL_HEAD - CTL_GAP * (rows + 1)) / max(1, rows));
+  x = CTL_GAP + (i % cols) * (w + CTL_GAP);
+  y = CTL_HEAD + CTL_GAP + (i / cols) * (h + CTL_GAP);
+}
+static void textAt(const String &t, int x, int y, int size, uint16_t c) { gfx->setTextSize(size); gfx->setTextColor(c); gfx->setCursor(x, y); gfx->print(t); }
+static void textMid(const String &t, int cx, int y, int size, uint16_t c) { textAt(t, cx - (int)t.length() * 3 * size, y, size, c); }
+static void ctlDrawTile(int i, bool force) {
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  String st = ctlState[i], name = ctlItems[i].name, group = ctlItems[i].group, ent = ctlItems[i].entity;
+  xSemaphoreGive(haLock);
+  bool armed = ctlArm == i && millis() - ctlArmAt < 4000;
+  String key = st + (armed ? "!" : "");
+  if (!force && key == ctlDrawn[i]) return;
+  ctlDrawn[i] = key;
+  int x, y, w, h;
+  ctlRect(i, x, y, w, h);
+  String dom = ent.substring(0, ent.indexOf('.'));
+  bool isOn = st == "on" || st == "open" || st == "playing" || st == "unlocked" || st == "home" || st == "heat" || st == "cool";
+  bool lock = dom == "lock", act = dom == "scene" || dom == "script" || dom == "button" || dom == "input_button";
+  uint16_t bg, fg = WHITE, sub = LIGHTGREY;
+  String word;
+  if (!st.length()) { bg = rgb565(28, 32, 40); word = "..."; }
+  else if (st == "unavailable" || st == "?") { bg = rgb565(28, 32, 40); fg = DARKGREY; word = st == "?" ? "no answer" : "offline"; }
+  else if (lock) {
+    bool locked = st == "locked";
+    bg = locked ? rgb565(30, 110, 60) : rgb565(170, 40, 40);
+    word = locked ? "Locked" : st == "unlocked" ? "Unlocked" : st;
+  } else if (act) { bg = rgb565(60, 50, 110); word = "Tap to run"; }
+  else if (isOn) { bg = rgb565(242, 179, 61); fg = rgb565(20, 16, 6); sub = rgb565(70, 50, 10); word = "On"; }
+  else { bg = rgb565(36, 44, 56); word = st == "off" ? "Off" : st; }
+  gfx->fillRoundRect(x, y, w, h, 14, bg);
+  if (armed) { gfx->drawRoundRect(x, y, w, h, 14, WHITE); gfx->drawRoundRect(x + 1, y + 1, w - 2, h - 2, 13, WHITE); }
+  int cx = x + w / 2, maxc = (w - 12) / 12;
+  if (group.length()) textMid(group.substring(0, (w - 8) / 6), cx, y + 10, 1, sub);
+  // the name: one or two lines at size 2
+  String l1 = name, l2;
+  if ((int)name.length() > maxc) {
+    int cut = name.lastIndexOf(' ', maxc);
+    if (cut < 1) cut = maxc;
+    l1 = name.substring(0, cut); l2 = name.substring(cut); l2.trim(); l2 = l2.substring(0, maxc);
+  }
+  int ny = y + h / 2 - (l2.length() ? 22 : 12);
+  textMid(l1, cx, ny, 2, fg);
+  if (l2.length()) textMid(l2, cx, ny + 20, 2, fg);
+  String w2 = armed ? String("Tap to unlock") : word;
+  textMid(w2.substring(0, (w - 8) / 6 * (armed ? 1 : 1)), cx, y + h - 22, (int)w2.length() * 12 <= w - 8 ? 2 : 1, armed ? WHITE : sub);
+}
+static void ctlDrawHead(bool force) {
+  struct tm t;
+  String clock = getLocalTime(&t, 0) ? String(t.tm_hour % 12 ? t.tm_hour % 12 : 12) + ":" + (t.tm_min < 10 ? "0" : "") + String(t.tm_min) : String("");
+  xSemaphoreTake(haLock, portMAX_DELAY);
+  String err = ctlErr;
+  xSemaphoreGive(haLock);
+  String key = clock + "|" + err + "|" + npTitle;
+  if (!force && key == ctlHeadDrawn) return;
+  ctlHeadDrawn = key;
+  gfx->fillRect(0, 0, TFT_W, CTL_HEAD, rgb565(10, 12, 18));
+  gfx->drawFastHLine(0, CTL_HEAD - 1, TFT_W, rgb565(40, 48, 60));
+  textAt(clock, 14, 14, 3, WHITE);
+  String mid = err.length() ? err.substring(0, 34) : npTitle.length() ? (npTitle + (npArtist.length() ? " - " + npArtist : "")).substring(0, 34)
+                                                                       : WiFi.localIP().toString();
+  textAt(mid, 120, 24, 1, err.length() ? rgb565(255, 120, 100) : LIGHTGREY);
+  gfx->fillRoundRect(TFT_W - 104, 10, 94, 38, 10, rgb565(36, 44, 56));
+  textMid("Done", TFT_W - 57, 21, 2, WHITE);
+}
+static void ctlShow() {
+  ctlOpen = true;
+  overlayUntil = 0;
+  overlayTop = 0;                               // the picture, the clock and the rain keep out of the way
+  ctlTouchAt = millis();
+  ctlArm = -1;
+  ctlPolledAt = 0;
+  ctlWasDown = true;
+  gfx->fillScreen(BLACK);
+  for (int i = 0; i < ctlN; i++) ctlDrawn[i] = "-";
+  ctlDrawHead(true);
+  for (int i = 0; i < ctlN; i++) ctlDrawTile(i, true);
+  asleep = false;
+  backlight();
+}
+static void ctlClose() {
+  ctlOpen = false;
+  ctlArm = -1;
+  overlayTop = TFT_H;
+  gfx->fillScreen(BLACK);
+  forceRedraw = true;
+  if (clockShown) clockForce = true;
+  else if (live() && !photoShown) render(bufs[drawIdx]);
+  else if (idleShown) { idleShown = false; panelKey = ""; showIdle(); }
+  else if (!live()) goDark();
+}
+// a tap on the controls screen
+static void ctlTap(int x, int y) {
+  ctlTouchAt = millis();
+  if (y < CTL_HEAD) { if (x > TFT_W - 150) ctlClose(); return; }
+  for (int i = 0; i < ctlN; i++) {
+    int rx, ry, rw, rh;
+    ctlRect(i, rx, ry, rw, rh);
+    if (x < rx || x >= rx + rw || y < ry || y >= ry + rh) continue;
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    String ent = ctlItems[i].entity, st = ctlState[i];
+    xSemaphoreGive(haLock);
+    bool unlock = false;
+    if (ent.startsWith("lock.") && st == "locked") {            // unlocking: tap, then tap again
+      if (ctlArm != i || millis() - ctlArmAt > 4000) { ctlArm = i; ctlArmAt = millis(); ctlDrawTile(i, true); return; }
+      unlock = true;
+    }
+    ctlArm = -1;
+    ctlCmdUnlock = unlock;
+    ctlCmd = i;
+    gfx->drawRoundRect(rx, ry, rw, rh, 14, WHITE);              // a flash: the press was seen
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    ctlDrawn[i] = "-";                                          // redraw when the new state comes in
+    xSemaphoreGive(haLock);
+    return;
+  }
+}
+// while the controls are up: touch, redraws, and closing after 30 s untouched
+static void ctlLoop(uint32_t now) {
+  static uint32_t touchAt = 0, upAt = 0;
+  if (now - touchAt > 30) {
+    touchAt = now;
+    int t = touched();
+    if (t == 1 && !ctlWasDown && now - upAt > 150) ctlTap(touchX, touchY);
+    if (t == 0 && ctlWasDown) upAt = now;
+    if (t >= 0) ctlWasDown = t == 1;
+  }
+  if (!ctlOpen) return;
+  if (ctlArm >= 0 && now - ctlArmAt > 4000) { int a = ctlArm; ctlArm = -1; ctlDrawTile(a, true); }
+  static uint32_t drawAt = 0;
+  if (now - drawAt > 200) { drawAt = now; ctlDrawHead(false); for (int i = 0; i < ctlN; i++) ctlDrawTile(i, false); }
+  if (now - ctlTouchAt > 30000) ctlClose();
 }
 
 // ---------- web ----------
@@ -1677,6 +1938,12 @@ static void handleRoot() {
     h += "<p class=note>" + st + "</p>";
   }
   h += "<div class=fsave><button>Save</button></div></fieldset>"
+       "<fieldset><legend>Tap controls</legend>"
+       "<p class=note>Tap the screen for these buttons (Home Assistant: uses the URL and token above). One per line: "
+       "<code># Room</code> starts a group, <code>Name = entity_id</code> adds a button (lights, switches, fans, locks, scenes). "
+       "Up to 12. A lock locks with one tap; unlocking takes a second tap. Empty: a tap shows the song and address as before.</p>"
+       "<textarea name=ctl rows=10 style='width:100%;font:13px monospace' placeholder='# Living room&#10;Lamp = switch.living_room_lamp'>" + esc(S.ctl) + "</textarea>"
+       "<div class=fsave><button>Save</button></div></fieldset>"
        "<fieldset><legend>Wi-Fi</legend>"
        "<label>Network<input type=text name=ssid value=\"" + esc(S.ssid) + "\"></label>"
        "<label>Password<input type=password name=pass placeholder='" + (S.pass.length() ? "saved; type to change" : "") + "'></label>"
@@ -1735,6 +2002,7 @@ static void handleSettings() {
     if (u.length()) S.haUrl = u.substring(0, 120);
     if (web.arg("hatok").length()) { S.haToken = web.arg("hatok"); S.haToken.trim(); }
     S.haSea = web.hasArg("hasea");
+    if (web.hasArg("ctl")) { S.ctl = web.arg("ctl").substring(0, 1500); ctlParse(); }
     for (int i = 0; i < HA_N; i++) {
       S.haEnt[i] = web.arg(HA_KEYS[i]);
       S.haEnt[i].trim();
@@ -1950,6 +2218,30 @@ static void setupWeb() {
     web.sendHeader("Cache-Control", "max-age=86400");
     web.send_P(200, "image/jpeg", (const char *)data, len);
   });
+  web.on("/api/controls", [] {   // the tap screen's buttons: GET = the list and states; POST {"ctl": "...", "open": true}
+    if (web.method() == HTTP_POST) {
+      JsonDocument in;
+      if (deserializeJson(in, web.arg("plain")) != DeserializationError::Ok) { web.send(400, "application/json", "{\"error\":\"Send JSON.\"}"); return; }
+      if (in["ctl"].is<const char *>()) {
+        xSemaphoreTake(haLock, portMAX_DELAY);
+        S.ctl = String((const char *)in["ctl"]).substring(0, 1500);
+        ctlParse();
+        xSemaphoreGive(haLock);
+        saveSettings();
+      }
+      if (in["open"] == true && ctlReady()) ctlShow();
+      if (in["open"] == false && ctlOpen) ctlClose();
+    }
+    JsonDocument d;
+    d["open"] = (bool)ctlOpen;
+    d["touch"]["x"] = touchX; d["touch"]["y"] = touchY;
+    xSemaphoreTake(haLock, portMAX_DELAY);
+    d["error"] = ctlErr;
+    JsonArray a = d["buttons"].to<JsonArray>();
+    for (int i = 0; i < ctlN; i++) { JsonObject o = a.add<JsonObject>(); o["group"] = ctlItems[i].group; o["name"] = ctlItems[i].name; o["entity"] = ctlItems[i].entity; o["state"] = ctlState[i]; }
+    xSemaphoreGive(haLock);
+    sendJson(d);
+  });
   web.on("/api/restart", HTTP_POST, [] {
     web.send(200, "application/json", "{\"ok\":true}");
     delay(300);
@@ -1974,6 +2266,7 @@ static void setupWeb() {
 void setup() {
   Serial.begin(115200);
   loadSettings();
+  ctlParse();
   pinMode(TFT_BCKL, OUTPUT);
   digitalWrite(TFT_BCKL, LOW);
 
@@ -2060,6 +2353,8 @@ void loop() {
     else if (now - wifiLostAt > 30000 && !apOn) { startAp(); if (!live()) { bool w = asleep; showIdle(); wakeAfterDraw(w); } }
   }
 
+  if (ctlOpen) { ctlLoop(now); delay(1); return; }          // the controls screen has the screen (and the touches)
+
   // The clock: when nothing is being shown (or always, in "Clock only") during its hours, or after a tap.
   if (clockPeekUntil && (int32_t)(now - clockPeekUntil) >= 0) clockPeekUntil = 0;
   {
@@ -2094,6 +2389,9 @@ void loop() {
     if (t == 1 && !wasDown && now - upAt > 250) {
       if (bootRain() && !(apOn && WiFi.status() != WL_CONNECTED)) {
         bootRainUntil = 0;                                 // a tap skips the power-on rain
+      } else if (ctlReady()) {
+        wasDown = true; upAt = now;
+        ctlShow();                                         // the controls (Home Assistant buttons)
       } else if (asleep) {                                 // dark: the info strip (song, IP) on black
         if (S.mode && timeOk()) clockPeekUntil = now + CLOCK_PEEK_MS;   // and the clock for a while
         gfx->fillScreen(BLACK); asleep = false; backlight(); showOverlay();
