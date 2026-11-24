@@ -544,20 +544,17 @@ static void background(uint16_t *buf, int face) {
           c = mix(c, {222, 182, 92}, band(edge, 10, 11));
           break;
         }
-        case F_LED: {  // black plastic
-          float t = (y + 0.5f) / H;
-          c = mix({26, 24, 24}, {6, 6, 6}, t);
+        case F_LED: {  // black plastic, even to the edges (a fade made it look like it stopped short of the screen)
+          c = {17, 16, 16};
           break;
         }
         case F_NIXIE: {  // walnut
           float grain = 0.82f + 0.12f * fastSin((y + 0.5f) * 0.09f + fastSin(x * 0.012f) * 3) + 0.06f * fastSin(y * 0.6f);
-          float vig = 1 - 0.35f * (dx * dx + dy * dy) / (240.0f * 240 * 2);
-          c = mul({92, 52, 28}, grain * vig);
+          c = mul({92, 52, 28}, grain);      // walnut grain, no darker edges
           break;
         }
-        case F_FLIP: {
-          float t = r / 340;
-          c = mix({40, 40, 44}, {14, 14, 16}, t);
+        case F_FLIP: {  // even charcoal, to the corners
+          c = {30, 30, 33};
           break;
         }
         case F_NEWYEAR: {  // New Year: midnight blue-black, faint gold rays, a gold bezel
