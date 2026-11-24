@@ -589,8 +589,8 @@ static void centered(const String &s, int y, int size, uint16_t color) {
 
 // ---------- Matrix rain: boot, idle (connecting / IP address) and firmware updates ----------
 // Full-screen falling green characters: a bright head per column, a trail fading from bright to dark green,
-// characters flickering as they change. A black panel in the middle shows the name and the status; the
-// rain never draws over it. Only cells whose colour changes are redrawn, so it's cheap enough to run
+// characters flickering as they change. A black panel in the middle shows the name and the status (only when there
+// is a status to show; otherwise the rain fills the whole screen); the rain never draws over the panel. Only cells whose colour changes are redrawn, so it's cheap enough to run
 // while connecting to Wi-Fi and while an update is written.
 static const int MR_CW = 12, MR_CH = 16, MR_COLS = TFT_W / MR_CW, MR_ROWS = TFT_H / MR_CH;   // 40 x 30
 static uint8_t mrChar[MR_COLS * MR_ROWS];
@@ -660,6 +660,10 @@ static void mrStep() {                                        // about 25 frames
   }
 }
 static void mrPanel(const String &title, uint16_t titleColor, const String &l2, uint16_t c2, const String &l3) {
+  if (!l2.length() && !l3.length()) {                       // nothing to say: no box, the rain fills the whole screen
+    boxX0 = boxY0 = boxX1 = boxY1 = 0;
+    return;
+  }
   boxX0 = 36; boxX1 = TFT_W - 36; boxY0 = 168; boxY1 = 318;
   gfx->fillRect(boxX0, boxY0, boxX1 - boxX0, boxY1 - boxY0, BLACK);
   gfx->drawRect(boxX0 + 3, boxY0 + 3, boxX1 - boxX0 - 6, boxY1 - boxY0 - 6, rgb565(0, 90, 25));
